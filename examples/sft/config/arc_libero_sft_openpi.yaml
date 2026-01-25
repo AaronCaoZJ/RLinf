@@ -13,23 +13,24 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: 0-0
+    actor,env,rollout: 2
 
 runner:
   task_type: sft
   logger:
     log_path: "../results"
-    project_name: rlinf
+    project_name: rlinf_sft_test
     experiment_name: "test_openpi"
-    logger_backends: ["tensorboard"] # wandb, swanlab
+    logger_backends: ["wandb"] # wandb, swanlab
+    wandb_entity: "aaroncaozj_team"  # WandB entity/team name
 
   max_epochs: 30000
   max_steps: -1
   val_check_interval: -1
-  save_interval: 2000
+  save_interval: 4000  # 与 OpenPi 一致
 
 data:
-  data_path: "/path/to/libero-data"
+  data_path: "/workspace/zhijun/RLinf/hf_download/datasets"
 
 algorithm:
   adv_type: gae
@@ -37,16 +38,18 @@ algorithm:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 4
-  global_batch_size: 128
+  micro_batch_size: 8  # 增大 micro_batch 提高效率
+  global_batch_size: 64  # 与 OpenPi 保持一致的 batch size
   seed: 0
 
   # Override the default values in model/pi0
   model:
+    # is_lora: True
+    # lora_rank: 32
     precision: null
-    model_path: "/path/to/pi0-model"
+    model_path: "/workspace/zhijun/RLinf/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
     num_action_chunks: 4 # interface for the env
-    add_value_head: True
+    add_value_head: False
     openpi:
       config_name: "pi0_libero"
       detach_critic_input: True
@@ -66,8 +69,8 @@ actor:
   # Override the default values in training_backend/fsdp
   fsdp_config:
     strategy: "fsdp"
-    sharding_strategy: "full_shard"
-    use_orig_params: False
+    sharding_strategy: "no_shard"
+    use_orig_params: True
     gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
     mixed_precision:
       param_dtype: ${actor.model.precision}
