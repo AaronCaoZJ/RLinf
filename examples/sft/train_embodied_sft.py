@@ -33,6 +33,8 @@ mp.set_start_method("spawn", force=True)
 )
 def main(cfg) -> None:
     os.environ["HF_LEROBOT_HOME"] = cfg.data.data_path
+    # Disable timestamp sync check for LeRobot v2.0 datasets
+    os.environ["LEROBOT_DISABLE_TIMESTAMP_SYNC_CHECK"] = "1"
 
     cfg = validate_cfg(cfg)
     print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))

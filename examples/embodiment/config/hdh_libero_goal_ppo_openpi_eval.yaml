@@ -15,7 +15,7 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: 3-6
+    actor,env,rollout: all
 
 runner:
   task_type: embodied
@@ -23,8 +23,7 @@ runner:
     log_path: "../results"
     project_name: rlinf
     experiment_name: "libero_goal_ppo_openpi"
-    logger_backends: ["wandb"] # wandb, swanlab
-    wandb_entity: "aaroncaozj_team"  # WandB entity/team name
+    logger_backends: ["tensorboard"] # wandb, swanlab
 
   max_epochs: 1000
   max_steps: -1
@@ -34,8 +33,7 @@ runner:
   val_check_interval: -1
   save_interval: 40
 
-  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
-  # ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
+  resume_dir: null
 
 algorithm:
   normalize_advantages: True
@@ -86,22 +84,20 @@ algorithm:
 
 env:
   group_name: "EnvGroup"
+  enable_offload: False
 
   # Override the default values in env/libero_goal
   train:
     total_num_envs: 64
     max_episode_steps: 320 # max episode steps for truncation
     max_steps_per_rollout_epoch: 320
-    use_fixed_reset_state_ids: True
-    use_ordered_reset_state_ids: False
   eval:
-    total_num_envs: 64
+    total_num_envs: 100
     auto_reset: True
     ignore_terminations: True
     max_episode_steps: 320
-    max_steps_per_rollout_epoch: 320
+    max_steps_per_rollout_epoch: 1600
     group_size: 1
-    use_fixed_reset_state_ids: True
     is_eval: True
     video_cfg:
       save_video: True
@@ -111,12 +107,18 @@ rollout:
   group_name: "RolloutGroup"
   generation_backend: "huggingface"
   recompute_logprobs: False
-  # unnorm_key: libero_10
   enable_offload: False
   pipeline_stage_num: 1
 
   model:
-    model_path: "/workspace/zhijun/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    # model_path: "/home/hdh/github_projects/RLinf/Models/lerobot/pi0_base"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260106-15:02:58/test_openpi/checkpoints/global_step_40/actor/model"
+
+    model_path: "/home/hdh/github_projects/RLinf/Models/rlinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260106-13:50:11/test_openpi/checkpoints/global_step_40/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/SFT/20260106-16:27:16/test_openpi/checkpoints/global_step_100/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260107-15:07:12/test_openpi/checkpoints/global_step_150/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260107-23:19:51/test_openpi/checkpoints/global_step_200/actor/model"
     precision: ${actor.model.precision}
 
 actor:
@@ -129,8 +131,15 @@ actor:
 
   # Override the default values in model/pi0
   model:
-    model_path: "/workspace/zhijun/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
-    num_action_chunks: 5 # interface for the env
+    # model_path: "/home/hdh/github_projects/RLinf/Models/lerobot/pi0_base"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260106-15:02:58/test_openpi/checkpoints/global_step_40/actor/model"
+
+    model_path: "/home/hdh/github_projects/RLinf/Models/rlinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260106-13:50:11/test_openpi/checkpoints/global_step_40/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/SFT/20260106-16:27:16/test_openpi/checkpoints/global_step_100/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260107-15:07:12/test_openpi/checkpoints/global_step_150/actor/model"
+    # model_path: "/home/hdh/github_projects/RLinf/logs/20260107-23:19:51/test_openpi/checkpoints/global_step_200/actor/model"
+    num_action_chunks: 4 # interface for the env
     add_value_head: True
     # openpi specific parameters
     openpi:
@@ -141,10 +150,9 @@ actor:
     value_lr: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
-    adam_eps: 1.0e-08
+    adam_eps: 1.0e-05
     weight_decay: 0.01
     clip_grad: 1.0
-    critic_warmup_steps: 0
 
   # Override the default values in training_backend/fsdp
   fsdp_config:

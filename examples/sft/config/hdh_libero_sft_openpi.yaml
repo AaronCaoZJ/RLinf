@@ -13,24 +13,23 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: 2
+    actor,env,rollout: all
 
 runner:
   task_type: sft
   logger:
     log_path: "../results"
-    project_name: rlinf_sft_test
+    project_name: rlinf
     experiment_name: "test_openpi"
     logger_backends: ["wandb"] # wandb, swanlab
-    wandb_entity: "aaroncaozj_team"  # WandB entity/team name
 
-  max_epochs: 30000
+  max_epochs: 30000  # 与 OpenPi 保持一致的总步数
   max_steps: -1
   val_check_interval: -1
   save_interval: 4000  # 与 OpenPi 一致
 
 data:
-  data_path: "/workspace/zhijun/RLinf/hf_download/datasets"
+  data_path: "/home/hdh/github_projects/RLinf/Datasets/openpi_lerobot_libero"
 
 algorithm:
   adv_type: gae
@@ -39,15 +38,14 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
   micro_batch_size: 8  # 增大 micro_batch 提高效率
-  global_batch_size: 64  # 与 OpenPi 保持一致的 batch size
+  global_batch_size: 32  # 与 OpenPi 保持一致的 batch size
   seed: 0
 
   # Override the default values in model/pi0
   model:
-    # is_lora: True
-    # lora_rank: 32
     precision: null
-    model_path: "/workspace/zhijun/RLinf/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    model_path: "/home/hdh/github_projects/RLinf/Models/rlinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    # model_path: "/home/hdh/github_projects/RLinf/Models/lerobot/pi0_base"
     num_action_chunks: 4 # interface for the env
     add_value_head: False
     openpi:
@@ -55,22 +53,24 @@ actor:
       detach_critic_input: True
 
   optim:
-    lr: 2.5e-5  
+    # 与 OpenPi 官方一致的学习率配置
+    lr: 2.5e-5  # peak_lr，与 OpenPi 一致
     value_lr: 1.55e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
-    adam_eps: 1.0e-08  
-    weight_decay: 1.0e-10  
+    adam_eps: 1.0e-08  # 与 OpenPi 一致
+    weight_decay: 1.0e-10  # 与 OpenPi 一致，几乎为 0
     clip_grad: 1.0
-    warmup_style: "cosine"  
-    lr_warmup_steps: 1000  
-    total_training_steps: 30000  # for lr scheduler cosine decay
+    # 学习率调度配置
+    warmup_style: "cosine"  # 使用 cosine decay with warmup
+    lr_warmup_steps: 1000  # warmup 步数
+    total_training_steps: 30000  # 总训练步数，用于 cosine decay
 
   # Override the default values in training_backend/fsdp
   fsdp_config:
     strategy: "fsdp"
-    sharding_strategy: "full_shard"
-    use_orig_params: False
+    sharding_strategy: "no_shard"
+    use_orig_params: True
     gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
     mixed_precision:
       param_dtype: ${actor.model.precision}
