@@ -30,7 +30,7 @@ runner:
   save_interval: 4000  # 与 OpenPi 一致
 
 data:
-  data_path: "/workspace/zhijun/RLinf/hf_download/datasets"
+  data_path: "/workspace1/zhijun/RLinf/hf_download/datasets"
 
 algorithm:
   adv_type: gae
@@ -47,7 +47,7 @@ actor:
     # is_lora: True
     # lora_rank: 32
     precision: null
-    model_path: "/workspace/zhijun/RLinf/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
+    model_path: "/workspace1/zhijun/RLinf/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
     num_action_chunks: 4 # interface for the env
     add_value_head: False
     openpi:

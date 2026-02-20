@@ -261,7 +261,7 @@ def crop_and_resize(image, crop_scale, batch_size):
     """
     if tf is None:
         raise ImportError("tensorflow is required for crop_and_resize")
-
+        import tensorflow as tf  # lazy import to avoid ROCm LLVM init crash in env worker processes
     assert image.shape.ndims == 3 or image.shape.ndims == 4
     expanded_dims = False
     if image.shape.ndims == 3:
@@ -300,7 +300,7 @@ def crop_and_resize(image, crop_scale, batch_size):
 def center_crop_image(image):
     if tf is None:
         raise ImportError("tensorflow is required for crop_and_resize")
-
+        import tensorflow as tf
     batch_size = 1
     crop_scale = 0.9
 
