@@ -5,6 +5,11 @@ save_dir = "/workspace1/zhijun/hf_download/models/RLinf-Pi0-LIBERO-Spatial-Objec
 repo_id = "RLinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
 repo_type="model"
 
+# download pi0.5 model
+save_dir = "/workspace1/zhijun/hf_download/models/RLinf-Pi05-LIBERO-SFT"
+repo_id = "RLinf/RLinf-Pi05-LIBERO-SFT"
+repo_type="model"
+
 # download libero dataset
 # save_dir = "/workspace1/zhijun/hf_download/datasets/physical-intelligence/libero"
 # repo_id = "physical-intelligence/libero"
