@@ -5,7 +5,7 @@ https://rlinf.readthedocs.io/en/latest/rst_source/start/installation.html
 
 ## Download docker image
 ```bash
-docker pull rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+docker pull rlinf/rlinf:agentic-rlinf0.1-torch2.6.0-openvla-openvlaoft-pi0
 ```
 
 ## Docker run container
@@ -16,10 +16,10 @@ docker run -it \
   --shm-size 128g \
   --net=host \
   --name zhijun_rlinf \
-  -v /users/zhijun:/users/zhijun \
-  -w /users/zhijun/RLinf \
+  -v /workspace1/zhijun:/workspace1/zhijun \
+  -w /workspace1/zhijun \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
-  rlinf/rlinf:agentic-rlinf0.1-maniskill_libero \
+  rlinf/rlinf:agentic-rlinf0.1-torch2.6.0-openvla-openvlaoft-pi0 \
   /bin/bash
 ```
 如果使用了一下命令删除该容器，则要重新创建，原来在容器中配置环境变量，安装的软件会丢失
