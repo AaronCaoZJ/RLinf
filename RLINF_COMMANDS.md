@@ -5,20 +5,30 @@ https://rlinf.readthedocs.io/en/latest/rst_source/start/installation.html
 
 ## Download docker image
 ```bash
+# docker pull rlinf/rlinf:agentic-rlinf0.1-torch2.6.0-openvla-openvlaoft-pi0
 docker pull rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
 ```
 
 ## Docker run container
 ⚠️ 只有第一次创建的时候运行这个命令
 ```bash
+if [[ -d /workspace1/zhijun ]]; then
+  BASE=/workspace1/zhijun
+else
+  BASE=/users/zhijun
+fi
+
 docker run -it \
   --gpus all \
   --shm-size 128g \
   --net=host \
   --name zhijun_rlinf \
-  -v /users/zhijun:/users/zhijun \
-  -w /users/zhijun/RLinf \
+  -v ${BASE}:${BASE} \
+  -w ${BASE}/RLinf \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e HF_HOME=${BASE}/hf_download \
+  -e WANDB_API_KEY=$WANDB_API_KEY \
   rlinf/rlinf:agentic-rlinf0.1-maniskill_libero \
   /bin/bash
 ```
@@ -38,12 +48,17 @@ docker exec -it zhijun_rlinf /bin/bash
 # QUICK START
 
 ## Switch to openpi env
+
 ```bash
 source switch_env openpi
 ```
 
 ## Run SFT using libero_sft_openpi.yaml
 ```bash
+export RANK=0  # set the rank of the current node
+cd /path_to_RLinf/ray_utils
+bash start_ray.sh
+
 bash examples/sft/run_embodiment_sft.sh arc_libero_sft_openpi # zhijun edited
 bash examples/sft/run_embodiment_sft.sh libero_sft_openpi # og
 ```
@@ -53,8 +68,6 @@ bash examples/sft/run_embodiment_sft.sh libero_sft_openpi # og
 bash examples/embodiment/eval_embodiment.sh arc_libero_goal_ppo_openpi LIBERO # zhijun edited
 bash examples/embodiment/eval_embodiment.sh libero_goal_ppo_openpi LIBERO # og
 ```
-
-
 
 # CHECK LOGS
 ⚠️ server 上的 logs 时间似乎较真实时间慢 8h

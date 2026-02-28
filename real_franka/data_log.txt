@@ -1,0 +1,36 @@
+
+############################################################
+# LOG TIME : 2026-02-28 18:03:22
+# DATASET  : /storage/zhijun/real_franka/pick_and_place
+############################################################
+
+############################################################
+  Dataset Inspector  |  /storage/zhijun/real_franka/pick_and_place
+############################################################
+
+============================================================
+  HDF5 详细结构: episode_0.hdf5
+============================================================
+  ├─ joint_action  (434,)  float32  (0.002 MB)
+  └─ [observations/]
+    ├─ ee_pose  (434, 8)  float32  (0.013 MB)
+    ├─ full_joint_pos  (434, 9)  float32  (0.015 MB)
+    └─ [images/]
+      ├─ camera_front_color  (434, 480, 640, 3)  uint8  (381.445 MB)
+      ├─ camera_left_color  (434, 480, 640, 3)  uint8  (381.445 MB)
+      ├─ camera_wrist_color  (434, 480, 640, 3)  uint8  (381.445 MB)
+    ├─ joint_pos  (434, 9)  float32  (0.015 MB)
+    ├─ joint_vel  (434, 9)  float32  (0.015 MB)
+    ├─ robot_base_pose_in_world  (434, 4, 4)  float32  (0.026 MB)
+  ├─ stage  (434,)  float32  (0.002 MB)
+  ├─ timestamp  (434,)  float64  (0.003 MB)
+
+  [Root Attributes]
+    sim: False
+
+============================================================
+  视频信息（采样自 episode 0，共 50 个 episode）
+============================================================
+  Camera 0: 640x480 @ 30.0 fps  codec=h264  pix_fmt=yuv420p  duration=28.97s
+  Camera 1: 640x480 @ 30.0 fps  codec=h264  pix_fmt=yuv420p  duration=28.97s
+  Camera 2: 640x480 @ 30.0 fps  codec=h264  pix_fmt=yuv420p  duration=28.97s
