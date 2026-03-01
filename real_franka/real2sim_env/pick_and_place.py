@@ -32,14 +32,15 @@ class PickAndPlaceEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        # 左侧三脚架视角：略高于桌面，从左侧斜看
-        pose = sapien_utils.look_at(eye=[0.3, -0.7, 0.45], target=[0.1, 0.05, 0.0])
+        # 正视角：camera 在 +X 方向，朝 -X 看，桌面和机器人正对
+        # robot 在 x=-0.615 面向 +X，桌面 z=0
+        pose = sapien_utils.look_at(eye=[0.8, 0.0, 0.4], target=[0.0, 0.0, 0.15])
         return [CameraConfig("external_cam", pose, 640, 480, np.deg2rad(55), 0.01, 10)]
 
     @property
     def _default_human_render_camera_configs(self):
-        pose = sapien_utils.look_at(eye=[0.6, 0.7, 0.6], target=[0.0, 0.0, 0.2])
-        return CameraConfig("render_camera", pose, 640, 480, 1, 0.01, 100)
+        pose = sapien_utils.look_at(eye=[0.8, 0.0, 0.4], target=[0.0, 0.0, 0.15])
+        return CameraConfig("render_camera", pose, 640, 480, np.deg2rad(55), 0.01, 100)
 
     def _load_agent(self, options: dict):
         super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
