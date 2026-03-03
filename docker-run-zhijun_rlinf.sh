@@ -5,12 +5,18 @@ else
   BASE=/users/zhijun
 fi
 
+EXTRA_MOUNTS=""
+if [[ -d /storage ]]; then
+  EXTRA_MOUNTS+=" -v /storage:/storage"
+fi
+
 docker run -it \
   --gpus all \
   --shm-size 128g \
   --net=host \
   --name zhijun_rlinf \
   -v ${BASE}:${BASE} \
+  ${EXTRA_MOUNTS} \
   -w ${BASE}/RLinf \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e HF_TOKEN=$HF_TOKEN \

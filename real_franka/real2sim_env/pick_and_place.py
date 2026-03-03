@@ -8,10 +8,29 @@ from scipy.spatial.transform import Rotation
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.utils.registration import register_env
 from mani_skill.agents.robots import Panda
+from mani_skill.agents.registration import register_agent
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils.structs.pose import Pose
 from mani_skill.utils.building import actors
 from mani_skill.utils.building.ground import build_ground
+from sapien.physx import PhysxMaterial
+
+
+@register_agent()
+class PandaHighFriction(Panda):
+    """Panda with high-friction finger pads to reliably grasp the block."""
+    uid = "panda_high_friction"
+    # Override gripper contact material: bump static/dynamic friction from 2.0 → 10.0
+    # to match the block friction and prevent finger slipping during lift.
+    urdf_config = dict(
+        _materials=dict(
+            gripper=dict(static_friction=100.0, dynamic_friction=100.0, restitution=0.0)
+        ),
+        link=dict(
+            panda_leftfinger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
+            panda_rightfinger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
+        ),
+    )
 
 # 2026-02-15 19:16:38 - __main__ - INFO: 旋转矩阵是:
 #  [[ 0.02816316  0.2178868  -0.97556762]
@@ -30,25 +49,46 @@ from mani_skill.utils.building.ground import build_ground
 # Distortion Coefficients : [0,0,0,0,0]
 # Show stream intrinsics again?[y/n]: y
 
-@register_env("BlockPAP-v1", max_episode_steps=200)
+# ── 对比模式开关 ────────────────────────────────────────────────────────────
+# True  → 使用 12 秒参考帧（ref_12），与 BlockPAP_ref_12.png 叠加，保存到 render/12
+# False → 使用  0 秒参考帧（ref_0），与 BlockPAP_ref_0.png  叠加，保存到 render/0
+USE_REF_12 = True
+# USE_REF_12 = False
+CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需与 RENDER_BASE_DIR 中的子目录一致
+RENDER_BASE_DIR = "real_franka/real2sim_env/render"
+
+@register_env("BlockPAP-v1", max_episode_steps=600)
 class PickAndPlaceEnv(BaseEnv):
 
-    SUPPORTED_ROBOTS = ["panda", "panda_wristcam"]
-    agent: Panda
+    SUPPORTED_ROBOTS = ["panda_high_friction", "panda", "panda_wristcam"]
+    agent: PandaHighFriction
 
-    def __init__(self, *args, robot_uids="panda", **kwargs):
+    # ── 相机平移向量预设 ────────────────────────────────────────────────────
+    _T_PRESETS = {
+        "og":   np.array([1.1002696, -0.00701879, 0.2589829]),   # 原始标定
+        "0302": np.array([1.1602696, -0.03301879, 0.3189829]),   # 2026-03-02
+        "0303": np.array([1.1102696, -0.00701879, 0.2789829]),   # 2026-03-03
+    }
+    _t = _T_PRESETS["og"]  # 默认使用原始标定
+
+    def __init__(self, *args, robot_uids="panda_high_friction", cam_t: str = "og", **kwargs):
+        """
+        cam_t: 相机平移向量预设名，可选 'og'（默认）、'0302'、'0303'。
+               对应 _T_PRESETS 中的三套标定结果。
+        """
         kwargs.setdefault("enable_shadow", True)
+        if cam_t not in self._T_PRESETS:
+            raise ValueError(f"cam_t='{cam_t}' 不在预设中，可选: {list(self._T_PRESETS)}")
+        self._t = self._T_PRESETS[cam_t]
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     # ── 标定参数（RealSense D435, 2026-02-15）─────────────────────────────
-    # _R, _t 均在机器人底座坐标系（= 世界系）下表示，保留原始精度
     _R = np.array([
         [ 0.02816316,  0.21788680, -0.97556762],
         [ 0.99959024, -0.00114196,  0.02860160],
         [ 0.00511786, -0.97597338, -0.21782968],
     ])
-    _t = np.array([1.1602696, -0.03301879, 0.3189829])
-  # _t = np.array([1.1002696, -0.00701879, 0.2589829])
+
     _K = np.array([
         [607.875,   0.0,   333.961],
         [  0.0,  607.719, 246.486],
@@ -56,20 +96,34 @@ class PickAndPlaceEnv(BaseEnv):
     ])
 
     # ── 场景参数 ────────────────────────────────────────────────────────────
-    # 桌面顶部世界 z = 31 mm（桌底 -4.2 mm，桌厚 35 mm）
+    # 桌面顶部世界 z = 30 mm（桌底 -5 mm，桌厚 35 mm）
     TABLE_Z = 0.03   # 单位：米
-
-    # 桌面中心 x = 210 mm (底座到桌边实测) + 300 mm (桌子半深)
+    # 桌面中心 x = 201 mm (底座到桌边实测) + 300 mm (桌子半深)
     _TABLE_CENTER_X = 0.501
-
     # 桌面尺寸（半X(前后) × 半Y(左右) × 半厚）
     _TABLE_HALF = (0.30, 0.60, 0.0175)   # 60cm深 × 120cm宽 × 3.5cm厚
+    # 桌面接触材质：提高摩擦，和物块配对更稳定
+    TABLE_STATIC_FRICTION = 50.0
+    TABLE_DYNAMIC_FRICTION = 50.0
+    TABLE_RESTITUTION = 0.0
 
-    # 长方体半尺寸：4cm × 4cm × 6cm 竖放
-    BLOCK_HALF_SIZE = [0.02, 0.02, 0.03]
-    # 杯垫半径和厚度
+    # 杯垫
+    _COASTER_CENTER_X = _TABLE_CENTER_X - 0.01
+    _COASTER_CENTER_Y = 0.059
     COASTER_RADIUS = 0.043
     COASTER_HALF_THICKNESS = 0.002
+
+    # 长方体物块
+    _BLOCK_CENTER_X = _TABLE_CENTER_X - 0.076
+    _BLOCK_CENTER_Y = -0.15
+    # 长方体半尺寸：4cm × 4cm × 6cm 竖放
+    BLOCK_HALF_SIZE = [0.02, 0.02, 0.03]
+    # 长方体物理参数：更重 + 更大摩擦 + 无回弹，减少被弹飞/打滑
+    BLOCK_DENSITY = 200.0
+    BLOCK_STATIC_FRICTION = 100.0
+    BLOCK_DYNAMIC_FRICTION = 100.0
+    BLOCK_RESTITUTION = 0.0
+
     # 机器人基座台：0.95m 正方体（上缘 z=0，下缘 z=-0.95）
     BASE_PEDESTAL_SIZE = 0.95
 
@@ -170,7 +224,12 @@ class PickAndPlaceEnv(BaseEnv):
         # 桌面中心在机器人前方 _TABLE_CENTER_X（木质纹理 + PBR）
         _WOOD_TEX = "/workspace1/zhijun/RLinf/rlinf/envs/maniskill/assets/carrot/more_table/textures/006.png"
         table_builder = self.scene.create_actor_builder()
-        table_builder.add_box_collision(half_size=self._TABLE_HALF)
+        table_phys_mat = PhysxMaterial(
+            static_friction=self.TABLE_STATIC_FRICTION,
+            dynamic_friction=self.TABLE_DYNAMIC_FRICTION,
+            restitution=self.TABLE_RESTITUTION,
+        )
+        table_builder.add_box_collision(half_size=self._TABLE_HALF, material=table_phys_mat)
         table_mat = sapien.render.RenderMaterial()
         table_mat.base_color_texture = sapien.render.RenderTexture2D(
             filename=_WOOD_TEX, mipmap_levels=4, srgb=True
@@ -185,7 +244,16 @@ class PickAndPlaceEnv(BaseEnv):
 
         # 橙红色长方体（竖放），带高光
         cube_builder = self.scene.create_actor_builder()
-        cube_builder.add_box_collision(half_size=self.BLOCK_HALF_SIZE)
+        cube_phys_mat = PhysxMaterial(
+            static_friction=self.BLOCK_STATIC_FRICTION,
+            dynamic_friction=self.BLOCK_DYNAMIC_FRICTION,
+            restitution=self.BLOCK_RESTITUTION,
+        )
+        cube_builder.add_box_collision(
+            half_size=self.BLOCK_HALF_SIZE,
+            material=cube_phys_mat,
+            density=self.BLOCK_DENSITY,
+        )
         cube_mat = sapien.render.RenderMaterial()
         cube_mat.base_color = [0.82, 0.22, 0.06, 1.0]  # 橙红色
         cube_mat.roughness  = 0.5
@@ -216,8 +284,11 @@ class PickAndPlaceEnv(BaseEnv):
             b = len(env_idx)
             
             # 真实 Panda 关节角（度）→ 弧度，最后两个为夹爪开合
-            qpos_deg = [0.2, -21.6, -0.9, -149.1, 0.0, 125.2, 47.3]
-            qpos_rad = np.deg2rad(qpos_deg).tolist()
+            # qpos_deg = [0.2, -21.6, -0.9, -149.1, 0.0, 125.2, 47.3]
+            # qpos_rad = np.deg2rad(qpos_deg).tolist()
+            _qpos_ref_0  = [0.03920901566743851, -0.6867635250091553, -0.009805346839129925, -2.6944820880889893, -0.013050149194896221, 2.007251739501953, 0.8208261132240295]
+            _qpos_ref_12 = [-0.29462647438049316, 0.26739823818206787, -0.04917740449309349, -2.537435531616211, -0.04237804561853409, 2.7909481525421143, 0.4803294539451599]
+            qpos_rad = _qpos_ref_12 if USE_REF_12 else _qpos_ref_0
             init_qpos = torch.tensor(qpos_rad + [0.04, 0.04], device=self.device)
             # init_qpos = torch.tensor([0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785, 0.04, 0.04], device=self.device)
             self.agent.robot.set_qpos(init_qpos.repeat(b, 1))
@@ -245,16 +316,16 @@ class PickAndPlaceEnv(BaseEnv):
             # cube_xyz[:, :2] = selected_xy
             # cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
 
-            # 固定方块初始位置：x = 桌面中线 - 8.5cm, y = -15cm
+            # 固定方块初始位置：
             cube_xyz = torch.zeros((b, 3), device=self.device)
-            cube_xyz[:, 0] = self._TABLE_CENTER_X - 0.11
-            cube_xyz[:, 1] = -0.175
+            cube_xyz[:, 0] = self._BLOCK_CENTER_X
+            cube_xyz[:, 1] = self._BLOCK_CENTER_Y
             cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2] # Z轴高度保持在桌面上
             
             
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 
-            coaster_pos = [self._TABLE_CENTER_X - 0.03, 0.0465, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
+            coaster_pos = [self._COASTER_CENTER_X, self._COASTER_CENTER_Y, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
             self.target.set_pose(
                 sapien.Pose(
                     p=coaster_pos,
@@ -287,10 +358,11 @@ if __name__ == "__main__":
     import imageio
     import os
 
-    SAVE_DIR = "real_franka/real2sim_env/render"
+    _REF_LABEL = "12" if USE_REF_12 else "0"
+    SAVE_DIR = f"{RENDER_BASE_DIR}/{CAM_T}/{_REF_LABEL}"
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    env = gym.make("BlockPAP-v1", obs_mode="rgb", render_mode="rgb_array")
+    env = gym.make("BlockPAP-v1", obs_mode="rgb", render_mode="rgb_array", cam_t=CAM_T)
     obs, _ = env.reset()
     print("Sensor cameras:", list(obs["sensor_data"].keys()))
 
@@ -338,7 +410,7 @@ if __name__ == "__main__":
     print(f"\n✅ Screenshot saved")
 
     # 叠加对比图：当前渲染图(50%) + 参考图(50%)
-    ref_path = "/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot.png"
+    ref_path = f"/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_{_REF_LABEL}.png"
     compare_path = os.path.join(SAVE_DIR, "BlockPAP-v1_compare.png")
     if os.path.exists(ref_path):
         ref_img = imageio.imread(ref_path)

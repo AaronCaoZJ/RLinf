@@ -60,6 +60,89 @@ def inspect_hdf5(hdf5_path: Path):
             for k, v in f.attrs.items():
                 print(f"    {k}: {v}")
 
+        print("\n" + "-" * 60)
+        print("  关键数据内容摘要")
+        print("-" * 60)
+        inspect_key_datasets(f)
+
+
+def summarize_numeric_dataset(name: str, arr: np.ndarray, head_rows: int = 999):
+    print(f"\n  [{name}]")
+    print(f"    shape={arr.shape}, dtype={arr.dtype}")
+
+    if arr.size == 0:
+        print("    empty dataset")
+        return
+
+    flat = arr.reshape(-1)
+    print(
+        f"    min={float(np.min(flat)):.6f}, max={float(np.max(flat)):.6f}, "
+        f"mean={float(np.mean(flat)):.6f}, std={float(np.std(flat)):.6f}"
+    )
+
+    if arr.ndim == 1:
+        n = min(head_rows, arr.shape[0])
+        print(f"    head({n})={arr[:n].tolist()}")
+        if arr.shape[0] > n:
+            print(f"    tail({n})={arr[-n:].tolist()}")
+        return
+
+    n = min(head_rows, arr.shape[0])
+    print(f"    head({n})=")
+    for i in range(n):
+        print(f"      t={i}: {arr[i].tolist()}")
+
+    if arr.shape[0] > n:
+        print(f"    tail({n})=")
+        for i in range(arr.shape[0] - n, arr.shape[0]):
+            print(f"      t={i}: {arr[i].tolist()}")
+
+
+def inspect_key_datasets(f: h5py.File):
+    def get_dataset(path: str):
+        if "/" in path:
+            g, d = path.split("/", 1)
+            if g in f and d in f[g]:
+                return f[g][d][:]
+            return None
+        return f[path][:] if path in f else None
+
+    numeric_targets = [
+        "timestamp",
+        "stage",
+        "joint_action",
+        "observations/joint_pos",
+        "observations/full_joint_pos",
+        "observations/ee_pose",
+    ]
+
+    for key in numeric_targets:
+        arr = get_dataset(key)
+        if arr is None:
+            print(f"\n  [{key}] not found")
+            continue
+        if np.issubdtype(arr.dtype, np.number):
+            summarize_numeric_dataset(key, arr)
+        else:
+            print(f"\n  [{key}] shape={arr.shape}, dtype={arr.dtype} (non-numeric)")
+
+    joint_pos = get_dataset("observations/joint_pos")
+    if joint_pos is not None and joint_pos.ndim == 2 and joint_pos.shape[1] >= 9:
+        gripper = joint_pos[:, -2:]
+        gripper_delta = np.diff(gripper, axis=0) if gripper.shape[0] > 1 else np.zeros_like(gripper)
+        print("\n  [gripper from observations/joint_pos last 2 dims]")
+        print(f"    range=({float(np.min(gripper)):.6f}, {float(np.max(gripper)):.6f})")
+        print(f"    mean_abs_delta={float(np.mean(np.abs(gripper_delta))):.6f}")
+        if gripper.shape[0] > 0:
+            print(f"    first={gripper[0].tolist()}, last={gripper[-1].tolist()}")
+
+    if "observations" in f and "images" in f["observations"]:
+        print("\n  [observations/images]")
+        img_group = f["observations"]["images"]
+        for img_key in img_group.keys():
+            ds = img_group[img_key]
+            print(f"    {img_key}: shape={ds.shape}, dtype={ds.dtype}")
+
 
 # ── 视频 ──────────────────────────────────────────────────────────────────────
 
