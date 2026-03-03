@@ -1,19 +1,34 @@
-# real2sim_env/pick_and_place.py
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
 import sapien
+from scipy.spatial.transform import Rotation
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.utils.registration import register_env
 from mani_skill.agents.robots import Panda
-from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.sensors.camera import CameraConfig
-from mani_skill.utils import sapien_utils
 from mani_skill.utils.structs.pose import Pose
 from mani_skill.utils.building import actors
+from mani_skill.utils.building.ground import build_ground
 
+# 2026-02-15 19:16:38 - __main__ - INFO: 旋转矩阵是:
+#  [[ 0.02816316  0.2178868  -0.97556762]
+#  [ 0.99959024 -0.00114196  0.0286016 ]
+#  [ 0.00511786 -0.97597338 -0.21782968]]
+# 2026-02-15 19:16:38 - __main__ - INFO: 平移向量是:
+#  [[ 1.10002696]
+#  [-0.00701879]
+#  [ 0.2589829 ]]
+# 2026-02-15 19:16:38 - __main__ - INFO: 四元数是：
+#  [ 0.55837595  0.54509737 -0.43449658 -0.44977537]
+
+# Principal Point         : 333.961, 246.486
+# Focal Length            : 607.875, 607.719
+# Distortion Model        : Inverse Brown Conrady
+# Distortion Coefficients : [0,0,0,0,0]
+# Show stream intrinsics again?[y/n]: y
 
 @register_env("BlockPAP-v1", max_episode_steps=200)
 class PickAndPlaceEnv(BaseEnv):
@@ -22,43 +37,167 @@ class PickAndPlaceEnv(BaseEnv):
     agent: Panda
 
     def __init__(self, *args, robot_uids="panda", **kwargs):
+        kwargs.setdefault("enable_shadow", True)
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
-    # 长方体半尺寸：5cm × 5cm × 8cm 竖放
-    BLOCK_HALF_SIZE = [0.025, 0.025, 0.04]
+    # ── 标定参数（RealSense D435, 2026-02-15）─────────────────────────────
+    # _R, _t 均在机器人底座坐标系（= 世界系）下表示，保留原始精度
+    _R = np.array([
+        [ 0.02816316,  0.21788680, -0.97556762],
+        [ 0.99959024, -0.00114196,  0.02860160],
+        [ 0.00511786, -0.97597338, -0.21782968],
+    ])
+    _t = np.array([1.1602696, -0.03301879, 0.3189829])
+  # _t = np.array([1.1002696, -0.00701879, 0.2589829])
+    _K = np.array([
+        [607.875,   0.0,   333.961],
+        [  0.0,  607.719, 246.486],
+        [  0.0,    0.0,     1.0  ],
+    ])
+
+    # ── 场景参数 ────────────────────────────────────────────────────────────
+    # 桌面顶部世界 z = 31 mm（桌底 -4.2 mm，桌厚 35 mm）
+    TABLE_Z = 0.03   # 单位：米
+
+    # 桌面中心 x = 210 mm (底座到桌边实测) + 300 mm (桌子半深)
+    _TABLE_CENTER_X = 0.501
+
+    # 桌面尺寸（半X(前后) × 半Y(左右) × 半厚）
+    _TABLE_HALF = (0.30, 0.60, 0.0175)   # 60cm深 × 120cm宽 × 3.5cm厚
+
+    # 长方体半尺寸：4cm × 4cm × 6cm 竖放
+    BLOCK_HALF_SIZE = [0.02, 0.02, 0.03]
     # 杯垫半径和厚度
-    COASTER_RADIUS = 0.06
+    COASTER_RADIUS = 0.043
     COASTER_HALF_THICKNESS = 0.002
+    # 机器人基座台：0.95m 正方体（上缘 z=0，下缘 z=-0.95）
+    BASE_PEDESTAL_SIZE = 0.95
+
+    def _make_cam_pose(self):
+        """
+        使用严格的 4x4 齐次变换矩阵生成相机位姿，避免 look_at 造成的微小偏差
+        """
+        # 1. 构造 OpenCV 约定下，相机在世界坐标系（机器人基座）中的变换矩阵
+        T_cam_to_world = np.eye(4)
+        T_cam_to_world[:3, :3] = self._R
+        T_cam_to_world[:3, 3] = self._t
+
+        # 2. 坐标系对齐：OpenCV (Z前, X右, Y下) -> SAPIEN (X前, Y左, Z上)
+        T_cv_to_sapien = np.array([
+            [ 0, -1,  0,  0],
+            [ 0,  0, -1,  0],
+            [ 1,  0,  0,  0],
+            [ 0,  0,  0,  1]
+        ])
+        T_sapien_cam_to_world = T_cam_to_world @ T_cv_to_sapien
+
+        # 3. 提取平移和 SAPIEN 格式的四元数 [w, x, y, z]
+        p = T_sapien_cam_to_world[:3, 3]
+        q_xyzw = Rotation.from_matrix(T_sapien_cam_to_world[:3, :3]).as_quat()
+        q_wxyz = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
+        
+        return sapien.Pose(p=p, q=q_wxyz)
 
     @property
     def _default_sensor_configs(self):
-        # 正视角：camera 在 +X 方向，朝 -X 看，桌面和机器人正对
-        # robot 在 x=-0.615 面向 +X，桌面 z=0
-        pose = sapien_utils.look_at(eye=[0.8, 0.0, 0.4], target=[0.0, 0.0, 0.15])
-        return [CameraConfig("external_cam", pose, 640, 480, np.deg2rad(55), 0.01, 10)]
+        pose = self._make_cam_pose()
+        return [CameraConfig("external_cam", pose, 640, 480,
+                             near=0.01, far=10, intrinsic=self._K)]
 
     @property
     def _default_human_render_camera_configs(self):
-        pose = sapien_utils.look_at(eye=[0.8, 0.0, 0.4], target=[0.0, 0.0, 0.15])
-        return CameraConfig("render_camera", pose, 640, 480, np.deg2rad(55), 0.01, 100)
+        pose = self._make_cam_pose()
+        return CameraConfig("render_camera", pose, 640, 480,
+                            near=0.01, far=100, intrinsic=self._K,
+                            shader_pack="default")
 
     def _load_agent(self, options: dict):
-        super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
+        # 机器人底座固定在世界原点
+        super()._load_agent(options, sapien.Pose(p=[0, 0, 0]))
+
+    def _load_lighting(self, options: dict):
+        """写实光照：环境光 + 主方向光（含阴影）+ 补光"""
+        # 降低环境光，让阴影更立体
+        self.scene.set_ambient_light([0.25, 0.25, 0.28])
+        # 主光：右前上方，模拟自然侧光，开启阴影
+        self.scene.add_directional_light(
+            [0.6, 0.4, -1.0], [1.1, 1.05, 1.0],
+            shadow=True, shadow_scale=5, shadow_map_size=4096
+        )
+        # 补光：左侧柔和蓝调，减少死角
+        self.scene.add_directional_light([-1.0, 0.2, -0.5], [0.35, 0.38, 0.45])
+        # 顶部点光：模拟天花板灯
+        self.scene.add_point_light([0.5, 0.0, 1.2], [1.8, 1.7, 1.6], shadow=False)
 
     def _load_scene(self, options: dict):
-        self.table_scene = TableSceneBuilder(self)
-        self.table_scene.build()
+        # 地面以机器人基座（世界原点）为参考：z = -0.95
+        build_ground(self.scene, floor_width=10, altitude=-self.BASE_PEDESTAL_SIZE)
 
-        # 橙色长方体（竖放）
-        self.cube = actors.build_box(
-            self.scene,
-            half_sizes=self.BLOCK_HALF_SIZE,
-            color=[1.0, 0.5, 0.0, 1.0],
-            name="cube",
-            initial_pose=sapien.Pose(p=[0, 0, self.BLOCK_HALF_SIZE[2]]),
+        # # 在 x = -3 位置添加一堵灰色墙
+        # wall_builder = self.scene.create_actor_builder()
+        # wall_half_size = [0.02, 10.0, 5.0]
+        # wall_builder.add_box_collision(half_size=wall_half_size)
+        # wall_mat = sapien.render.RenderMaterial()
+        # wall_mat.base_color = [0.6, 0.6, 0.6, 1.0]
+        # wall_mat.roughness = 0.8
+        # wall_mat.metallic = 0.0
+        # wall_builder.add_box_visual(half_size=wall_half_size, material=wall_mat)
+        # wall_builder.set_initial_pose(sapien.Pose(p=[-3.0, 0, -self.BASE_PEDESTAL_SIZE + wall_half_size[2]]))
+        # self._back_wall = wall_builder.build_kinematic(name="x_minus3_wall")
+
+        # 机器人基座台：x 负方向保持不变，x 正方向延伸到 +1.2m；上缘 z=0，下缘 z=-0.95
+        pedestal_x_min = -self.BASE_PEDESTAL_SIZE / 2
+        pedestal_x_max = 1.2
+        pedestal_half_x = (pedestal_x_max - pedestal_x_min) / 2
+        pedestal_center_x = (pedestal_x_max + pedestal_x_min) / 2
+        pedestal_half_y = self.BASE_PEDESTAL_SIZE / 2
+        pedestal_half_z = self.BASE_PEDESTAL_SIZE / 2
+
+        pedestal_builder = self.scene.create_actor_builder()
+        pedestal_builder.add_box_collision(half_size=[pedestal_half_x, pedestal_half_y, pedestal_half_z])
+        pedestal_mat = sapien.render.RenderMaterial()
+        pedestal_mat.base_color = [0.2, 0.2, 0.2, 1.0]
+        pedestal_mat.roughness = 0.2
+        pedestal_mat.metallic = 1.0
+        pedestal_mat.specular = 0.9
+        pedestal_builder.add_box_visual(
+            half_size=[pedestal_half_x, pedestal_half_y, pedestal_half_z],
+            material=pedestal_mat,
         )
+        pedestal_builder.set_initial_pose(sapien.Pose(p=[pedestal_center_x, 0, -pedestal_half_z]))
+        self._base_pedestal = pedestal_builder.build_kinematic(name="robot_base_pedestal")
 
-        # 绿色圆形杯垫（平放，axis 沿 Z）
+        # 桌面中心在机器人前方 _TABLE_CENTER_X（木质纹理 + PBR）
+        _WOOD_TEX = "/workspace1/zhijun/RLinf/rlinf/envs/maniskill/assets/carrot/more_table/textures/006.png"
+        table_builder = self.scene.create_actor_builder()
+        table_builder.add_box_collision(half_size=self._TABLE_HALF)
+        table_mat = sapien.render.RenderMaterial()
+        table_mat.base_color_texture = sapien.render.RenderTexture2D(
+            filename=_WOOD_TEX, mipmap_levels=4, srgb=True
+        )
+        table_mat.roughness = 0.55
+        table_mat.metallic  = 0.0
+        table_mat.specular  = 0.5
+        table_builder.add_box_visual(half_size=self._TABLE_HALF, material=table_mat)
+        table_builder.set_initial_pose(sapien.Pose(p=[self._TABLE_CENTER_X, 0,
+                                                       self.TABLE_Z - self._TABLE_HALF[2]]))
+        self._table = table_builder.build_kinematic(name="table")
+
+        # 橙红色长方体（竖放），带高光
+        cube_builder = self.scene.create_actor_builder()
+        cube_builder.add_box_collision(half_size=self.BLOCK_HALF_SIZE)
+        cube_mat = sapien.render.RenderMaterial()
+        cube_mat.base_color = [0.82, 0.22, 0.06, 1.0]  # 橙红色
+        cube_mat.roughness  = 0.5
+        cube_mat.metallic   = 0.0
+        cube_mat.specular   = 0.6
+        cube_builder.add_box_visual(half_size=self.BLOCK_HALF_SIZE, material=cube_mat)
+        cube_builder.set_initial_pose(sapien.Pose(p=[self._TABLE_CENTER_X, 0,
+                                                     self.TABLE_Z + self.BLOCK_HALF_SIZE[2]]))
+        self.cube = cube_builder.build(name="cube")
+
+        # 绿色圆形杯垫（平放）
+        # build_cylinder 默认沿 x 轴，需要绕 y 轴旋转 90 度使其“平放”在桌面上 (轴向变为 Z)
         self.target = actors.build_cylinder(
             self.scene,
             radius=self.COASTER_RADIUS,
@@ -66,36 +205,76 @@ class PickAndPlaceEnv(BaseEnv):
             color=[0.0, 0.8, 0.2, 1.0],
             name="target_coaster",
             body_type="static",
-            initial_pose=sapien.Pose(p=[0.15, 0.1, self.COASTER_HALF_THICKNESS]),
+            initial_pose=sapien.Pose(
+                p=[self._TABLE_CENTER_X, 0.0, self.TABLE_Z + self.COASTER_HALF_THICKNESS],
+                q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]  # 绕 Y 轴旋转 90 度
+            ),
         )
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
             b = len(env_idx)
-            self.table_scene.initialize(env_idx)
+            
+            # 真实 Panda 关节角（度）→ 弧度，最后两个为夹爪开合
+            qpos_deg = [0.2, -21.6, -0.9, -149.1, 0.0, 125.2, 47.3]
+            qpos_rad = np.deg2rad(qpos_deg).tolist()
+            init_qpos = torch.tensor(qpos_rad + [0.04, 0.04], device=self.device)
+            # init_qpos = torch.tensor([0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785, 0.04, 0.04], device=self.device)
+            self.agent.robot.set_qpos(init_qpos.repeat(b, 1))
+            self.agent.robot.set_qvel(torch.zeros((b, 9), device=self.device))
 
-            # 随机化长方体位置（桌面左侧区域）
-            cube_xyz = torch.zeros((b, 3))
-            cube_xyz[:, 0] = torch.rand(b) * 0.15 - 0.10   # x: -0.10~0.05
-            cube_xyz[:, 1] = torch.rand(b) * 0.20 - 0.10   # y: -0.10~0.10
-            cube_xyz[:, 2] = self.BLOCK_HALF_SIZE[2]         # z: 桌面 + 半高
+            self._table.set_pose(
+                sapien.Pose(p=[self._TABLE_CENTER_X, 0,
+                               self.TABLE_Z - self._TABLE_HALF[2]])
+            )
+            
+            # 暂时注释：随机方块初始位置逻辑
+            # cx = self._TABLE_CENTER_X
+            # cy = -0.12
+            # d = 0.06
+            # candidate_points = torch.tensor([
+            #     [cx, cy],
+            #     [cx + d, cy + d],
+            #     [cx + d, cy - d],
+            #     [cx - d, cy + d],
+            #     [cx - d, cy - d]
+            # ], device=self.device)
+            # random_indices = torch.randint(0, 5, (b,), device=self.device)
+            # selected_xy = candidate_points[random_indices]
+            # cube_xyz = torch.zeros((b, 3), device=self.device)
+            # cube_xyz[:, :2] = selected_xy
+            # cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
+
+            # 固定方块初始位置：x = 桌面中线 - 8.5cm, y = -15cm
+            cube_xyz = torch.zeros((b, 3), device=self.device)
+            cube_xyz[:, 0] = self._TABLE_CENTER_X - 0.11
+            cube_xyz[:, 1] = -0.175
+            cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2] # Z轴高度保持在桌面上
+            
+            
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 
-            # 杯垫固定位置（桌面右侧）
-            self.target.set_pose(sapien.Pose(p=[0.15, 0.1, self.COASTER_HALF_THICKNESS]))
+            coaster_pos = [self._TABLE_CENTER_X - 0.03, 0.0465, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
+            self.target.set_pose(
+                sapien.Pose(
+                    p=coaster_pos,
+                    q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]
+                )
+            )
 
     def evaluate(self):
-        cube_pos = self.cube.pose.p
+        cube_pos   = self.cube.pose.p
         target_pos = self.target.pose.p
-        dist_xy = torch.norm(cube_pos[:, :2] - target_pos[:, :2], dim=1)
-        on_target = (dist_xy < 0.06) & (cube_pos[:, 2] < 0.06)
+        dist_xy    = torch.norm(cube_pos[:, :2] - target_pos[:, :2], dim=1)
+        # 允许 Z 轴存在一定误差
+        on_target  = (dist_xy < 0.06) & (cube_pos[:, 2] < self.TABLE_Z + 0.06)
         return {"success": on_target}
 
     def compute_dense_reward(self, obs, action, info):
-        cube_pos = self.cube.pose.p
+        cube_pos   = self.cube.pose.p
         target_pos = self.target.pose.p
-        dist = torch.norm(cube_pos - target_pos, dim=1)
-        reward = 1 - torch.tanh(5 * dist)
+        dist       = torch.norm(cube_pos - target_pos, dim=1)
+        reward     = 1 - torch.tanh(5 * dist)
         reward[info["success"]] = 5.0
         return reward
 
@@ -103,51 +282,94 @@ class PickAndPlaceEnv(BaseEnv):
         return self.compute_dense_reward(obs, action, info) / 5.0
 
 
-# 工具函数：从真实标定结果导入相机外参
-def load_camera_extrinsics_from_calibration(T_cam_to_base: np.ndarray) -> sapien.Pose:
-    """T_cam_to_base: 4x4 变换矩阵，从真实标定获得，返回 sapien.Pose"""
-    from scipy.spatial.transform import Rotation
-    R = T_cam_to_base[:3, :3]
-    t = T_cam_to_base[:3, 3]
-    quat_xyzw = Rotation.from_matrix(R).as_quat()
-    quat_wxyz = np.array([quat_xyzw[3], *quat_xyzw[:3]])
-    return sapien.Pose(p=t, q=quat_wxyz)
-
-
 if __name__ == "__main__":
     import gymnasium as gym
     import imageio
     import os
 
-    # 1. 定义并自动创建保存路径
     SAVE_DIR = "real_franka/real2sim_env/render"
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # 初始化环境
     env = gym.make("BlockPAP-v1", obs_mode="rgb", render_mode="rgb_array")
     obs, _ = env.reset()
     print("Sensor cameras:", list(obs["sensor_data"].keys()))
 
+    base_env = env.unwrapped
+
+    # 打印 reset 后最终的初始化位置（只打印一次）
+    cube_p = base_env.cube.pose.p[0].cpu().numpy()
+    coaster_p = base_env.target.pose.p[0].cpu().numpy()
+    print(f"\n[初始化]")
+    print(f"  物块位置 : ({cube_p[0]:.4f}, {cube_p[1]:.4f}, {cube_p[2]:.4f})")
+    print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
+
+    print(f"\n[场景] 世界系 = 机器人底座系")
+    print(f"  机器人底座 : (0, 0, 0)")
+    print(f"  相机位置   : {base_env._t}  ← 直接来自标定 _t")
+    print(f"  桌面顶部   : z = {base_env.TABLE_Z}")
+    print(f"  桌子中心   : x = {base_env._TABLE_CENTER_X}")
+    print(f"  相机离桌面 : {base_env._t[2] - base_env.TABLE_Z:.6f} m")
+
+    for name, cam_obj in base_env._sensors.items():
+        params  = cam_obj.get_params()
+        K_sim   = params["intrinsic_cv"]
+        E_sim   = params["extrinsic_cv"]
+        if hasattr(K_sim, "cpu"):
+            K_sim = K_sim[0].cpu().numpy()
+            E_sim = E_sim[0].cpu().numpy()
+        R_E, t_E = E_sim[:3, :3], E_sim[:3, 3]
+        p_cam = -R_E.T @ t_E
+        print(f"[{name}] fx={K_sim[0,0]:.6f} fy={K_sim[1,1]:.6f} "
+              f"cx={K_sim[0,2]:.6f} cy={K_sim[1,2]:.6f}")
+        print(f" 相机世界位置={p_cam}")
+
     def get_frame(obs):
-        # 获取第一个相机的 RGB 数据并处理 batch 维度
         cam_name = list(obs["sensor_data"].keys())[0]
         img = obs["sensor_data"][cam_name]["rgb"]
-        
-        if len(img.shape) == 4: # [batch, h, w, c]
+        if len(img.shape) == 4:
             img = img[0]
-            
         img = img.cpu().numpy()
         if img.max() <= 1.0:
             img = (img * 255).astype(np.uint8)
         return img
 
-    # 2. 保存初始截图
     frame = get_frame(obs)
-    screenshot_path = os.path.join(SAVE_DIR, "BlockPAP-v1_screenshot.png")
-    imageio.imwrite(screenshot_path, frame)
-    print(f"✅ Screenshot saved to: {screenshot_path}")
+    imageio.imwrite(os.path.join(SAVE_DIR, "BlockPAP-v1_screenshot.png"), frame)
+    print(f"\n✅ Screenshot saved")
 
-    # 3. 运行随机策略并录制视频
+    # 叠加对比图：当前渲染图(50%) + 参考图(50%)
+    ref_path = "/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot.png"
+    compare_path = os.path.join(SAVE_DIR, "BlockPAP-v1_compare.png")
+    if os.path.exists(ref_path):
+        ref_img = imageio.imread(ref_path)
+
+        # 统一通道为 RGB
+        if ref_img.ndim == 2:
+            ref_img = np.stack([ref_img, ref_img, ref_img], axis=-1)
+        if ref_img.shape[-1] == 4:
+            ref_img = ref_img[..., :3]
+
+        # 尺寸不一致时做中心裁剪到公共尺寸
+        h1, w1 = frame.shape[:2]
+        h2, w2 = ref_img.shape[:2]
+        h = min(h1, h2)
+        w = min(w1, w2)
+
+        def center_crop(img, th, tw):
+            ih, iw = img.shape[:2]
+            top = (ih - th) // 2
+            left = (iw - tw) // 2
+            return img[top:top + th, left:left + tw]
+
+        frame_aligned = center_crop(frame, h, w)
+        ref_aligned = center_crop(ref_img, h, w)
+
+        compare = (0.5 * frame_aligned.astype(np.float32) + 0.5 * ref_aligned.astype(np.float32)).astype(np.uint8)
+        imageio.imwrite(compare_path, compare)
+        print(f"✅ Compare image saved: {compare_path}")
+    else:
+        print(f"⚠️ 参考图不存在，跳过对比图生成: {ref_path}")
+
     frames = [frame]
     for _ in range(60):
         action = env.action_space.sample()
@@ -155,9 +377,7 @@ if __name__ == "__main__":
         frames.append(get_frame(obs))
         if done or trunc:
             break
-            
-    video_path = os.path.join(SAVE_DIR, "BlockPAP-v1_demo.mp4")
-    imageio.mimsave(video_path, frames, fps=20)
-    print(f"✅ Video saved to: {video_path}")
-    
+
+    imageio.mimsave(os.path.join(SAVE_DIR, "BlockPAP-v1_demo.mp4"), frames, fps=20)
+    print(f"✅ Video saved")
     env.close()
