@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Hybrid trajectory replay: high-stiffness PD arm + physics gripper.
+Delta-action trajectory replay: high-stiffness PD arm + physics gripper.
 
-Replays joint trajectory from HDF5 in the BlockPAP-v1 ManiSkill environment.
-  - Arm joints (0-6): very high-K PD drive (K=1e5) tracks targets through the physics
-    solver — contacts are maintained continuously so friction can carry the block upward.
-  - Gripper joints (7-8): normal PD drives; targets = joint_pos[:,7:9]/2 (observed
-    total-width 0~0.08 → per-finger 0~0.04, clean signal with no anomalies).
+Same as replay_traj.py but uses incremental (delta) actions instead of
+absolute joint position targets.
+
+  arm_delta[t]  = joint_pos[t+1, :7] - joint_pos[t, :7]
+  grip_delta[t] = (joint_pos[t+1, 7:9] - joint_pos[t, 7:9]) / 2
+
+At each step the accumulated target is updated:
+  current_arm  += arm_delta[t]
+  current_grip += grip_delta[t]
+and then set as the PD drive target.
 """
 import argparse
 import os
@@ -91,14 +96,6 @@ def setup_hybrid_drives(base_env,
                         gripper_stiffness: float = 2000.0,
                         gripper_damping: float = 100.0,
                         gripper_force_limit: float = 500.0):
-    """
-    Configure joint drives for hybrid replay:
-      - Arm (joints 0-6): very high stiffness PD drive (K=1e5, D=1e3, F=1e6).
-        The arm tracks set_joint_drive_targets almost perfectly (<0.3deg error)
-        while going through the physics solver — so contacts are maintained
-        continuously and friction can carry the block upward.
-      - Gripper (joints 7-8): normal PD drives for physics grasping.
-    """
     active_joints = base_env.agent.robot.get_active_joints()
     for i, joint in enumerate(active_joints):
         if i < 7:
@@ -114,20 +111,12 @@ def setup_hybrid_drives(base_env,
 
 def hybrid_step(base_env, arm_target: np.ndarray, gripper_target: np.ndarray,
                 sim_steps: int = 5):
-    """
-    One hybrid replay step:
-      Set arm + gripper PD drive targets, then run sim_steps physics substeps.
-      The arm's high-stiffness drive tracks arm_target with <0.3deg error while
-      going through the physics solver — contacts are maintained continuously,
-      and friction can carry the block upward as the arm rises.
-    """
     robot = base_env.agent.robot
     device = base_env.device
 
     arm_t = torch.tensor(arm_target, device=device, dtype=torch.float32)
     grip_t = torch.tensor(gripper_target, device=device, dtype=torch.float32)
 
-    # Set drive targets for all joints (arm: high-K tracking; gripper: squeeze)
     all_targets = torch.cat([arm_t, grip_t]).unsqueeze(0)  # (1, 9)
     all_joints = robot.get_active_joints()
     robot.set_joint_drive_targets(all_targets, all_joints)
@@ -142,7 +131,7 @@ def hybrid_step(base_env, arm_target: np.ndarray, gripper_target: np.ndarray,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hybrid replay: kinematic arm + physics gripper",
+        description="Delta-action replay: kinematic arm + physics gripper",
     )
     parser.add_argument("--traj", type=str, default="0",
                         choices=["0", "15", "25", "40", "45"],
@@ -157,16 +146,15 @@ def main():
     parser.add_argument("--obs-mode", type=str, default="rgb")
     parser.add_argument("--render-mode", type=str, default="rgb_array")
     parser.add_argument("--sim-steps", type=int, default=5,
-                        help="Physics substeps per trajectory frame (more = smoother gripper)")
+                        help="Physics substeps per trajectory frame")
     parser.add_argument("--gripper-stiffness", type=float, default=2000.0)
-    parser.add_argument("--gripper-damping", type=float, default=100.0,
-                        help="PD damping for gripper joints (keep ~100, not 2000)")
+    parser.add_argument("--gripper-damping", type=float, default=100.0)
     parser.add_argument("--gripper-force-limit", type=float, default=500.0)
     parser.add_argument("--side-view", action="store_true",
                         help="Concatenate left-side camera view to output video")
     parser.add_argument("--cam-t", type=str, default="og",
                         choices=["og", "0302", "0303"],
-                        help="相机平移向量预设: 'og'（2026-02-15）、'0302'（2026-03-02）、'0303'（2026-03-03）")
+                        help="相机平移向量预设: 'og'、'0302'、'0303'")
     args = parser.parse_args()
 
     # 根据 --traj 自动推断路径
@@ -175,7 +163,7 @@ def main():
     if args.h5 is None:
         args.h5 = f"{_HDF5_BASE}/episode_{args.traj}.hdf5"
     if args.out is None:
-        args.out = f"{_RENDER_BASE}/traj{args.traj}/{args.cam_t}/replay.mp4"
+        args.out = f"{_RENDER_BASE}/traj{args.traj}/{args.cam_t}/replay_delta.mp4"
 
     if not os.path.exists(args.h5):
         raise FileNotFoundError(args.h5)
@@ -189,21 +177,25 @@ def main():
         raise ValueError(f"Need ≥9 dims, got {qpos.shape[1]}")
     qpos = qpos[:, :9]
 
-    # ── Gripper targets: joint_pos[:,7:9]/2 ────────────────────────────────
-    # joint_pos stores total-width (0~0.08); per-finger sim target = /2 (0~0.04).
-    # During grasp the observed value ~0.039 → target 0.0195, so the PD spring
-    # continuously squeezes the block. This signal is clean with no anomalies.
+    # ── Gripper: total-width → per-finger ──────────────────────────────────
+    # joint_pos[:,7:9] stores total-width (0~0.08); /2 gives per-finger target.
     qpos[:, 7:9] = qpos[:, 7:9] / 2.0
-    print(f"Gripper targets (joint_pos/2): "
-          f"min={qpos[:,7:9].min():.4f}, max={qpos[:,7:9].max():.4f}")
 
     if args.max_frames > 0:
         qpos = qpos[: args.max_frames]
 
-    print(f"Arm range:     [{qpos[:, :7].min():.4f}, {qpos[:, :7].max():.4f}]")
-    print(f"Gripper range: [{qpos[:, 7:9].min():.6f}, {qpos[:, 7:9].max():.6f}]")
+    # ── Compute deltas ──────────────────────────────────────────────────────
+    # arm_deltas[t]  = qpos[t+1, :7] - qpos[t, :7]
+    # grip_deltas[t] = qpos[t+1, 7:9] - qpos[t, 7:9]
+    arm_deltas  = np.diff(qpos[:, :7],  axis=0)  # (T-1, 7)
+    grip_deltas = np.diff(qpos[:, 7:9], axis=0)  # (T-1, 2)
+    T = len(arm_deltas)
 
-    # ── 注入初始化配置：让环境 reset() 使用对应轨迹的 block/coaster/qpos ──
+    print(f"Arm  delta range:    [{arm_deltas.min():.6f}, {arm_deltas.max():.6f}]")
+    print(f"Grip delta range:    [{grip_deltas.min():.6f}, {grip_deltas.max():.6f}]")
+    print(f"Total replay steps:  {T}")
+
+    # ── 注入初始化配置 ───────────────────────────────────────────────────
     pick_and_place.TRAJ_ID = args.traj
     pick_and_place.USE_REF_12 = False   # 回放始终从 t=0 姿态出发
     print(f"TRAJ_ID={args.traj}, USE_REF_12=False → 使用 _TRAJ_CONFIGS['{args.traj}'] 初始化")
@@ -236,8 +228,6 @@ def main():
           f"F={args.gripper_force_limit})")
 
     # ── Initialize to qpos[0] ───────────────────────────────────────────
-    # set_qpos to place the robot, then set drive targets = q0 so the high-K
-    # arm drive doesn't immediately try to pull away from the initial pose.
     robot = base_env.agent.robot
     q0 = torch.tensor(qpos[0], device=base_env.device, dtype=torch.float32).unsqueeze(0)
     robot.set_qpos(q0)
@@ -247,13 +237,17 @@ def main():
     base_env.scene.update_render()
 
     frames = [capture_frame(env, base_env, side_cam_name)]
-    print(f"Replaying {qpos.shape[0]} frames (sim_steps={args.sim_steps}) → {args.out}")
-    if args.side_view:
-        print(f"Side view enabled: {side_cam_name}")
+    print(f"Replaying {T} delta steps (sim_steps={args.sim_steps}) → {args.out}")
 
-    # ── Hybrid replay loop ───────────────────────────────────────────────
-    for t in range(qpos.shape[0]):
-        hybrid_step(base_env, qpos[t, :7], qpos[t, 7:9], sim_steps=args.sim_steps)
+    # ── Delta replay loop ────────────────────────────────────────────────
+    # Accumulate from qpos[0]; apply delta[t] to get the target for step t+1.
+    current_arm  = qpos[0, :7].copy()
+    current_grip = qpos[0, 7:9].copy()
+
+    for t in range(T):
+        current_arm  += arm_deltas[t]
+        current_grip += grip_deltas[t]
+        hybrid_step(base_env, current_arm, current_grip, sim_steps=args.sim_steps)
         frame = capture_frame(env, base_env, side_cam_name)
         if frame is not None:
             frames.append(frame)

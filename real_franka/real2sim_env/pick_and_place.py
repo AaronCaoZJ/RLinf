@@ -49,12 +49,9 @@ class PandaHighFriction(Panda):
 # Distortion Coefficients : [0,0,0,0,0]
 # Show stream intrinsics again?[y/n]: y
 
-# ── 对比模式开关 ────────────────────────────────────────────────────────────
-# True  → 使用 12 秒参考帧（ref_12），与 BlockPAP_ref_12.png 叠加，保存到 render/12
-# False → 使用  0 秒参考帧（ref_0），与 BlockPAP_ref_0.png  叠加，保存到 render/0
-USE_REF_12 = True
-# USE_REF_12 = False
+USE_REF_12 = False  # 运行时由 __main__ 循环覆盖（False=t0, True=t12）
 CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需与 RENDER_BASE_DIR 中的子目录一致
+TRAJ_ID = "15"  # 轨迹 ID，选择 0、15、25、40 或 45
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
 
 @register_env("BlockPAP-v1", max_episode_steps=600)
@@ -90,10 +87,15 @@ class PickAndPlaceEnv(BaseEnv):
     ])
 
     _K = np.array([
-        [607.875,   0.0,   333.961],
-        [  0.0,  607.719, 246.486],
+        [607.875,   0.0,   348.961],
+        [  0.0,  607.719, 270.486],
         [  0.0,    0.0,     1.0  ],
     ])
+    # _K = np.array([
+    #     [607.875,   0.0,   333.961],
+    #     [  0.0,  607.719, 246.486],
+    #     [  0.0,    0.0,     1.0  ],
+    # ])
 
     # ── 场景参数 ────────────────────────────────────────────────────────────
     # 桌面顶部世界 z = 30 mm（桌底 -5 mm，桌厚 35 mm）
@@ -108,14 +110,14 @@ class PickAndPlaceEnv(BaseEnv):
     TABLE_RESTITUTION = 0.0
 
     # 杯垫
-    _COASTER_CENTER_X = _TABLE_CENTER_X - 0.01
-    _COASTER_CENTER_Y = 0.059
+    # _COASTER_CENTER_X = _TABLE_CENTER_X - 0.01
+    # _COASTER_CENTER_Y = 0.059
     COASTER_RADIUS = 0.043
     COASTER_HALF_THICKNESS = 0.002
 
     # 长方体物块
-    _BLOCK_CENTER_X = _TABLE_CENTER_X - 0.076
-    _BLOCK_CENTER_Y = -0.15
+    # _BLOCK_CENTER_X = _TABLE_CENTER_X - 0.076
+    # _BLOCK_CENTER_Y = -0.15
     # 长方体半尺寸：4cm × 4cm × 6cm 竖放
     BLOCK_HALF_SIZE = [0.02, 0.02, 0.03]
     # 长方体物理参数：更重 + 更大摩擦 + 无回弹，减少被弹飞/打滑
@@ -126,6 +128,44 @@ class PickAndPlaceEnv(BaseEnv):
 
     # 机器人基座台：0.95m 正方体（上缘 z=0，下缘 z=-0.95）
     BASE_PEDESTAL_SIZE = 0.95
+
+    # ── 各轨迹初始化参数 ──────────────────────────────────────────────────────
+    # block_xy:   物块初始位置 (x, y)
+    # coaster_xy: 杯垫中心位置 (x, y)
+    # qpos_ref_0:  t=0  时刻真实关节角（弧度，7 个关节）
+    # qpos_ref_12: t=12 时刻真实关节角（弧度，7 个关节）
+    _TRAJ_CONFIGS = {
+        "0": {
+            "block_xy":    (_TABLE_CENTER_X - 0.076, -0.15),
+            "coaster_xy":  (_TABLE_CENTER_X - 0.01, 0.059),
+            "qpos_ref_0":  [0.03920901566743851, -0.6867635250091553, -0.009805346839129925, -2.6944820880889893, -0.013050149194896221, 2.007251739501953, 0.8208261132240295],
+            "qpos_ref_12": [-0.29462647438049316, 0.26739823818206787, -0.04917740449309349, -2.537435531616211, -0.04237804561853409, 2.7909481525421143, 0.4803294539451599],
+        },
+        "15": {
+            "block_xy":    (_TABLE_CENTER_X + 0.083, -0.14),
+            "coaster_xy":  (_TABLE_CENTER_X - 0.01, 0.03),
+            "qpos_ref_0":  [0.04231681674718857, -0.46236130595207214, -0.018441837280988693, -2.6430587768554688, -0.002512579783797264, 2.179812431335449, 0.8177617788314819],
+            "qpos_ref_12": [-0.15030790865421295, 0.5153473019599915, -0.09237745404243469, -2.0401413440704346, -0.007849287241697311, 2.5943570137023926, 0.589148759841919],
+        },
+        "25": {
+            "block_xy":    (_TABLE_CENTER_X + 0.04, -0.1),
+            "coaster_xy":  (_TABLE_CENTER_X - 0.01, 0.02),
+            "qpos_ref_0":  [0.017783386632800102, -0.5367491841316223, 0.02235139161348343, -2.7003209590911865, 0.019186807796359062, 2.1525814533233643, 0.8190732598304749],
+            "qpos_ref_12": [-0.1456894725561142, 0.3910311460494995, -0.04914682358503342, -2.324347734451294, 0.019173461943864822, 2.7607336044311523, 0.6215252876281738],
+        },
+        "40": {
+            "block_xy":    (_TABLE_CENTER_X - 0.076, -0.03),
+            "coaster_xy":  (_TABLE_CENTER_X - 0.01, 0.04),
+            "qpos_ref_0":  [0.020625591278076172, -0.5485104322433472, 0.0025699941907078028, -2.711549758911133, 0.013794232159852982, 2.171576976776123, 0.8035998940467834],
+            "qpos_ref_12": [0.05512106418609619, 0.10421822965145111, -0.004373287782073021, -2.563603639602661, 0.013808992691338062, 2.692765712738037, 0.974073588848114],
+        },
+        "45": {
+            "block_xy":    (_TABLE_CENTER_X + 0.090, -0.03),
+            "coaster_xy":  (_TABLE_CENTER_X - 0.01, 0.04),
+            "qpos_ref_0":  [0.044930748641490936, -0.413775235414505, -0.015586936846375465, -2.6283504962921143, -0.015863671898841858, 2.2137093544006348, 0.811760663986206],
+            "qpos_ref_12": [0.002559863729402423, 0.3720402419567108, -0.027471385896205902, -2.115872859954834, -0.015866732224822044, 2.4757132530212402, 0.8062286376953125],
+        },
+    }
 
     def _make_cam_pose(self):
         """
@@ -283,14 +323,10 @@ class PickAndPlaceEnv(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
             
-            # 真实 Panda 关节角（度）→ 弧度，最后两个为夹爪开合
-            # qpos_deg = [0.2, -21.6, -0.9, -149.1, 0.0, 125.2, 47.3]
-            # qpos_rad = np.deg2rad(qpos_deg).tolist()
-            _qpos_ref_0  = [0.03920901566743851, -0.6867635250091553, -0.009805346839129925, -2.6944820880889893, -0.013050149194896221, 2.007251739501953, 0.8208261132240295]
-            _qpos_ref_12 = [-0.29462647438049316, 0.26739823818206787, -0.04917740449309349, -2.537435531616211, -0.04237804561853409, 2.7909481525421143, 0.4803294539451599]
-            qpos_rad = _qpos_ref_12 if USE_REF_12 else _qpos_ref_0
+            # 根据 TRAJ_ID 查找对应轨迹的初始化参数
+            traj_cfg = self._TRAJ_CONFIGS[TRAJ_ID]
+            qpos_rad = traj_cfg["qpos_ref_12"] if USE_REF_12 else traj_cfg["qpos_ref_0"]
             init_qpos = torch.tensor(qpos_rad + [0.04, 0.04], device=self.device)
-            # init_qpos = torch.tensor([0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785, 0.04, 0.04], device=self.device)
             self.agent.robot.set_qpos(init_qpos.repeat(b, 1))
             self.agent.robot.set_qvel(torch.zeros((b, 9), device=self.device))
 
@@ -298,34 +334,19 @@ class PickAndPlaceEnv(BaseEnv):
                 sapien.Pose(p=[self._TABLE_CENTER_X, 0,
                                self.TABLE_Z - self._TABLE_HALF[2]])
             )
-            
-            # 暂时注释：随机方块初始位置逻辑
-            # cx = self._TABLE_CENTER_X
-            # cy = -0.12
-            # d = 0.06
-            # candidate_points = torch.tensor([
-            #     [cx, cy],
-            #     [cx + d, cy + d],
-            #     [cx + d, cy - d],
-            #     [cx - d, cy + d],
-            #     [cx - d, cy - d]
-            # ], device=self.device)
-            # random_indices = torch.randint(0, 5, (b,), device=self.device)
-            # selected_xy = candidate_points[random_indices]
-            # cube_xyz = torch.zeros((b, 3), device=self.device)
-            # cube_xyz[:, :2] = selected_xy
-            # cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
 
-            # 固定方块初始位置：
+            # 根据 TRAJ_ID 设置物块初始位置
+            block_x, block_y = traj_cfg["block_xy"]
             cube_xyz = torch.zeros((b, 3), device=self.device)
-            cube_xyz[:, 0] = self._BLOCK_CENTER_X
-            cube_xyz[:, 1] = self._BLOCK_CENTER_Y
-            cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2] # Z轴高度保持在桌面上
+            cube_xyz[:, 0] = block_x
+            cube_xyz[:, 1] = block_y
+            cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
             
             
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 
-            coaster_pos = [self._COASTER_CENTER_X, self._COASTER_CENTER_Y, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
+            coaster_x, coaster_y = traj_cfg["coaster_xy"]
+            coaster_pos = [coaster_x, coaster_y, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
             self.target.set_pose(
                 sapien.Pose(
                     p=coaster_pos,
@@ -358,23 +379,11 @@ if __name__ == "__main__":
     import imageio
     import os
 
-    _REF_LABEL = "12" if USE_REF_12 else "0"
-    SAVE_DIR = f"{RENDER_BASE_DIR}/{CAM_T}/{_REF_LABEL}"
-    os.makedirs(SAVE_DIR, exist_ok=True)
-
     env = gym.make("BlockPAP-v1", obs_mode="rgb", render_mode="rgb_array", cam_t=CAM_T)
     obs, _ = env.reset()
-    print("Sensor cameras:", list(obs["sensor_data"].keys()))
-
     base_env = env.unwrapped
 
-    # 打印 reset 后最终的初始化位置（只打印一次）
-    cube_p = base_env.cube.pose.p[0].cpu().numpy()
-    coaster_p = base_env.target.pose.p[0].cpu().numpy()
-    print(f"\n[初始化]")
-    print(f"  物块位置 : ({cube_p[0]:.4f}, {cube_p[1]:.4f}, {cube_p[2]:.4f})")
-    print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
-
+    print("Sensor cameras:", list(obs["sensor_data"].keys()))
     print(f"\n[场景] 世界系 = 机器人底座系")
     print(f"  机器人底座 : (0, 0, 0)")
     print(f"  相机位置   : {base_env._t}  ← 直接来自标定 _t")
@@ -405,51 +414,59 @@ if __name__ == "__main__":
             img = (img * 255).astype(np.uint8)
         return img
 
-    frame = get_frame(obs)
-    imageio.imwrite(os.path.join(SAVE_DIR, "BlockPAP-v1_screenshot.png"), frame)
-    print(f"\n✅ Screenshot saved")
+    def center_crop(img, th, tw):
+        ih, iw = img.shape[:2]
+        top = (ih - th) // 2
+        left = (iw - tw) // 2
+        return img[top:top + th, left:left + tw]
 
-    # 叠加对比图：当前渲染图(50%) + 参考图(50%)
-    ref_path = f"/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_{_REF_LABEL}.png"
-    compare_path = os.path.join(SAVE_DIR, "BlockPAP-v1_compare.png")
-    if os.path.exists(ref_path):
-        ref_img = imageio.imread(ref_path)
+    # 依次渲染 t=0 和 t=12 两种情况
+    for use_ref_12 in [False, True]:
+        USE_REF_12 = use_ref_12   # 更新模块级变量，env.reset() 会读取新值
+        _REF_LABEL = "12" if USE_REF_12 else "0"
+        SAVE_DIR = f"{RENDER_BASE_DIR}/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
+        os.makedirs(SAVE_DIR, exist_ok=True)
 
-        # 统一通道为 RGB
-        if ref_img.ndim == 2:
-            ref_img = np.stack([ref_img, ref_img, ref_img], axis=-1)
-        if ref_img.shape[-1] == 4:
-            ref_img = ref_img[..., :3]
+        obs, _ = env.reset()
 
-        # 尺寸不一致时做中心裁剪到公共尺寸
-        h1, w1 = frame.shape[:2]
-        h2, w2 = ref_img.shape[:2]
-        h = min(h1, h2)
-        w = min(w1, w2)
+        cube_p    = base_env.cube.pose.p[0].cpu().numpy()
+        coaster_p = base_env.target.pose.p[0].cpu().numpy()
+        print(f"\n[t={_REF_LABEL}s 初始化]")
+        print(f"  物块位置 : ({cube_p[0]:.4f}, {cube_p[1]:.4f}, {cube_p[2]:.4f})")
+        print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
 
-        def center_crop(img, th, tw):
-            ih, iw = img.shape[:2]
-            top = (ih - th) // 2
-            left = (iw - tw) // 2
-            return img[top:top + th, left:left + tw]
+        frame = get_frame(obs)
+        imageio.imwrite(os.path.join(SAVE_DIR, "BlockPAP-v1_screenshot.png"), frame)
+        print(f"✅ Screenshot saved → {SAVE_DIR}")
 
-        frame_aligned = center_crop(frame, h, w)
-        ref_aligned = center_crop(ref_img, h, w)
+        # 叠加对比图：当前渲染图(50%) + 参考图(50%)
+        ref_path = f"/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
+        compare_path = os.path.join(SAVE_DIR, "BlockPAP-v1_compare.png")
+        if os.path.exists(ref_path):
+            ref_img = imageio.imread(ref_path)
+            if ref_img.ndim == 2:
+                ref_img = np.stack([ref_img, ref_img, ref_img], axis=-1)
+            if ref_img.shape[-1] == 4:
+                ref_img = ref_img[..., :3]
+            h1, w1 = frame.shape[:2]
+            h2, w2 = ref_img.shape[:2]
+            h, w = min(h1, h2), min(w1, w2)
+            compare = (0.5 * center_crop(frame, h, w).astype(np.float32)
+                     + 0.5 * center_crop(ref_img, h, w).astype(np.float32)).astype(np.uint8)
+            imageio.imwrite(compare_path, compare)
+            print(f"✅ Compare image saved: {compare_path}")
+        else:
+            print(f"⚠️ 参考图不存在，跳过对比图生成: {ref_path}")
 
-        compare = (0.5 * frame_aligned.astype(np.float32) + 0.5 * ref_aligned.astype(np.float32)).astype(np.uint8)
-        imageio.imwrite(compare_path, compare)
-        print(f"✅ Compare image saved: {compare_path}")
-    else:
-        print(f"⚠️ 参考图不存在，跳过对比图生成: {ref_path}")
+        frames = [frame]
+        for _ in range(60):
+            action = env.action_space.sample()
+            obs, _, done, trunc, _ = env.step(action)
+            frames.append(get_frame(obs))
+            if done or trunc:
+                break
 
-    frames = [frame]
-    for _ in range(60):
-        action = env.action_space.sample()
-        obs, _, done, trunc, _ = env.step(action)
-        frames.append(get_frame(obs))
-        if done or trunc:
-            break
+        imageio.mimsave(os.path.join(SAVE_DIR, "BlockPAP-v1_demo.mp4"), frames, fps=20)
+        print(f"✅ Video saved → {SAVE_DIR}")
 
-    imageio.mimsave(os.path.join(SAVE_DIR, "BlockPAP-v1_demo.mp4"), frames, fps=20)
-    print(f"✅ Video saved")
     env.close()
