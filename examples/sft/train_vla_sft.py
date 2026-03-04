@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 
 import hydra
@@ -23,7 +24,7 @@ from rlinf.config import validate_cfg
 from rlinf.runners.sft_runner import SFTRunner
 from rlinf.scheduler import Cluster
 from rlinf.utils.placement import HybridComponentPlacement
-from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
+from rlinf.workers.sft.fsdp_vla_sft_worker import FSDPVlaSftWorker
 
 mp.set_start_method("spawn", force=True)
 
@@ -32,19 +33,19 @@ mp.set_start_method("spawn", force=True)
     version_base="1.1", config_path="config", config_name="maniskill_ppo_openvlaoft"
 )
 def main(cfg) -> None:
-    os.environ["HF_LEROBOT_HOME"] = cfg.data.data_path
+    os.environ["HF_LEROBOT_HOME"] = cfg.data.train_data_paths
     # Disable timestamp sync check for LeRobot v2.0 datasets
     os.environ["LEROBOT_DISABLE_TIMESTAMP_SYNC_CHECK"] = "1"
 
     cfg = validate_cfg(cfg)
-    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
+    logging.info(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
 
     cluster = Cluster(cluster_cfg=cfg.cluster)
     component_placement = HybridComponentPlacement(cfg, cluster)
 
     # Create actor worker group
     actor_placement = component_placement.get_strategy("actor")
-    actor_group = FSDPSftWorker.create_group(cfg).launch(
+    actor_group = FSDPVlaSftWorker.create_group(cfg).launch(
         cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
     )
 

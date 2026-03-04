@@ -313,8 +313,9 @@ class Worker(metaclass=WorkerMeta):
     logging.basicConfig()
     logger = logging.getLogger(Cluster.SYS_NAME)
     logger.setLevel(Cluster.LOGGING_LEVEL)
-    torch_platform = torch.cuda
-    torch_device_type = "cuda"
+    accelerator_type = AcceleratorUtil.get_accelerator_type()
+    torch_platform = AcceleratorUtil.get_torch_platform(accelerator_type)
+    torch_device_type = AcceleratorUtil.get_device_type(accelerator_type)
 
     def __new__(cls, *args, **kwargs):
         """Create a new instance of the Worker class."""
@@ -349,15 +350,18 @@ class Worker(metaclass=WorkerMeta):
         self._accelerator_type = AcceleratorType(
             os.environ.get("ACCELERATOR_TYPE", str(AcceleratorType.NO_ACCEL.value))
         )
+        self._accelerator_model = os.environ.get("ACCELERATOR_MODEL", "")
         self._local_accelerator_rank = int(os.environ.get("LOCAL_ACCELERATOR_RANK", -1))
         self._node_local_rank = int(os.environ.get("NODE_LOCAL_RANK", -1))
         self._node_local_world_size = int(os.environ.get("NODE_LOCAL_WORLD_SIZE", -1))
+        Worker.accelerator_type = self._accelerator_type
         Worker.torch_device_type = AcceleratorUtil.get_device_type(
             self._accelerator_type
         )
         Worker.torch_platform = AcceleratorUtil.get_torch_platform(
             self._accelerator_type
         )
+        self.accelerator_type = Worker.accelerator_type
         self.torch_device_type = Worker.torch_device_type
         self.torch_platform = Worker.torch_platform
 
@@ -1254,6 +1258,7 @@ class Worker(metaclass=WorkerMeta):
             group_world_size=self._world_size,
             cluster_node_rank=self._cluster_node_rank,
             accelerator_type=self._accelerator_type,
+            accelerator_model=self._accelerator_model,
             accelerator_rank=self._local_accelerator_rank,
             node_ip=node_ip,
             node_port=node_port,
