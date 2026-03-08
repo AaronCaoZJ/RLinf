@@ -51,7 +51,7 @@ class PandaHighFriction(Panda):
 
 USE_REF_12 = False  # 运行时由 __main__ 循环覆盖（False=t0, True=t12）
 CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需与 RENDER_BASE_DIR 中的子目录一致
-TRAJ_ID = "15"  # 轨迹 ID，选择 0、15、25、40 或 45
+TRAJ_ID = "15"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
 
 @register_env("BlockPAP-v1", max_episode_steps=600)
@@ -322,10 +322,43 @@ class PickAndPlaceEnv(BaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
             b = len(env_idx)
-            
-            # 根据 TRAJ_ID 查找对应轨迹的初始化参数
-            traj_cfg = self._TRAJ_CONFIGS[TRAJ_ID]
-            qpos_rad = traj_cfg["qpos_ref_12"] if USE_REF_12 else traj_cfg["qpos_ref_0"]
+
+            if TRAJ_ID in self._TRAJ_CONFIGS:
+                # ── Replay / prepare 模式：使用固定轨迹配置 ─────────────────
+                traj_cfg = self._TRAJ_CONFIGS[TRAJ_ID]
+                qpos_rad = traj_cfg["qpos_ref_12"] if USE_REF_12 else traj_cfg["qpos_ref_0"]
+                block_x,   block_y   = traj_cfg["block_xy"]
+                coaster_x, coaster_y = traj_cfg["coaster_xy"]
+            else:
+                # ── MimicGen 生成模式（TRAJ_ID == "random"）──────────────────
+                # 从 5 条轨迹配置中随机选一个作为初始 qpos 基础，
+                # 物块和杯垫位置在指定区域内均匀采样。
+                import random as _random
+
+                # 物块：X ∈ [TABLE_CENTER_X - 0.10, TABLE_CENTER_X + 0.10]
+                #        Y ∈ [-0.15, -0.03]
+                block_x = self._TABLE_CENTER_X + np.random.uniform(-0.10, 0.10)
+                block_y = np.random.uniform(-0.15, -0.03)
+
+                # 杯垫：X ∈ [TABLE_CENTER_X - 0.03, TABLE_CENTER_X + 0.01]
+                #        Y ∈ [0.02, 0.06]
+                coaster_x = self._TABLE_CENTER_X + np.random.uniform(-0.03, 0.01)
+                coaster_y = np.random.uniform(0.03, 0.05)
+
+                # 找到与采样位置最近的预定义轨迹配置
+                best_tid, best_dist = None, float("inf")
+                for tid, cfg in self._TRAJ_CONFIGS.items():
+                    bx, by = cfg["block_xy"]
+                    cx, cy = cfg["coaster_xy"]
+                    d = ((block_x - bx) ** 2 + (block_y - by) ** 2
+                         + (coaster_x - cx) ** 2 + (coaster_y - cy) ** 2)
+                    if d < best_dist:
+                        best_dist, best_tid = d, tid
+                ref_cfg = self._TRAJ_CONFIGS[best_tid]
+                qpos_rad = ref_cfg["qpos_ref_0"]
+                # 保存最近配置 ID，供 DataGenerator 选择对应源轨迹
+                self._nearest_traj_id = best_tid
+
             init_qpos = torch.tensor(qpos_rad + [0.04, 0.04], device=self.device)
             self.agent.robot.set_qpos(init_qpos.repeat(b, 1))
             self.agent.robot.set_qvel(torch.zeros((b, 9), device=self.device))
@@ -335,32 +368,40 @@ class PickAndPlaceEnv(BaseEnv):
                                self.TABLE_Z - self._TABLE_HALF[2]])
             )
 
-            # 根据 TRAJ_ID 设置物块初始位置
-            block_x, block_y = traj_cfg["block_xy"]
             cube_xyz = torch.zeros((b, 3), device=self.device)
             cube_xyz[:, 0] = block_x
             cube_xyz[:, 1] = block_y
             cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
-            
-            
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 
-            coaster_x, coaster_y = traj_cfg["coaster_xy"]
             coaster_pos = [coaster_x, coaster_y, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
             self.target.set_pose(
                 sapien.Pose(
                     p=coaster_pos,
-                    q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]
+                    q=[np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]
                 )
             )
 
     def evaluate(self):
         cube_pos   = self.cube.pose.p
+        cube_quat  = self.cube.pose.q  # [w, x, y, z]
         target_pos = self.target.pose.p
         dist_xy    = torch.norm(cube_pos[:, :2] - target_pos[:, :2], dim=1)
-        # 允许 Z 轴存在一定误差
-        on_target  = (dist_xy < 0.06) & (cube_pos[:, 2] < self.TABLE_Z + 0.06)
-        return {"success": on_target}
+        # XY: block centre must be within coaster radius
+        # Z:  block centre should be near coaster top + block half-height (±2 cm tolerance)
+        expected_z = target_pos[:, 2] + self.COASTER_HALF_THICKNESS + self.BLOCK_HALF_SIZE[2]
+        xy_ok = dist_xy < self.COASTER_RADIUS
+        z_ok  = torch.abs(cube_pos[:, 2] - expected_z) < 0.02
+
+        # Upright check: local +Z axis should stay close to world +Z.
+        # For quaternion [w, x, y, z], the world z-component of local z-axis is:
+        # up_z = 1 - 2 * (x^2 + y^2). Require tilt <= 25 deg.
+        x = cube_quat[:, 1]
+        y = cube_quat[:, 2]
+        up_z = 1.0 - 2.0 * (x * x + y * y)
+        upright_ok = up_z > np.cos(np.deg2rad(25.0))
+
+        return {"success": xy_ok & z_ok & upright_ok}
 
     def compute_dense_reward(self, obs, action, info):
         cube_pos   = self.cube.pose.p

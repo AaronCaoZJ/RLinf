@@ -77,9 +77,9 @@ python real_franka/real2sim_env/pick_and_place.py
 
 # 多视角渲染
 python real_franka/real2sim_env/multiview_render.py \
-  --out-dir real_franka/real2sim_env/render/BlockPAP_multiview \
-  --env-id BlockPAP-MultiView-v1 \
-  --distance-scale 1.35
+--out-dir real_franka/real2sim_env/render/BlockPAP_multiview \
+--env-id BlockPAP-MultiView-v1 \
+--distance-scale 1.35
 ```
 
 ## Replay Action
@@ -103,3 +103,7 @@ python real_franka/real2sim_env/replay_delta.py
 # TRAJ_LIST = [0, 15, 25, 40, 45]，可以修改处理哪几条视频
 python /workspace1/zhijun/RLinf/real_franka/real2sim_env/overlay_videos.py
 ```
+
+## MimicGen Commands
+
+Go to [MIMICGEN_COMMANDS](real_franka/real2sim_env/MIMICGEN_COMMANDS.md)
