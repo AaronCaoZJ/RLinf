@@ -197,7 +197,7 @@ def reset_to_state(base_env, state):
 
     # Restore coaster pose (28D states only)
     if len(state) >= 28:
-        coaster_z = base_env.TABLE_Z + base_env.COASTER_HALF_THICKNESS
+        coaster_z = base_env.TABLE_Z + base_env.COASTER_THICKNESS
         base_env.target.set_pose(sapien.Pose(
             p=[state[25], state[26], coaster_z],
             q=[np.cos(np.pi / 4), 0, np.sin(np.pi / 4), 0],
@@ -319,7 +319,7 @@ def replay_and_extract(traj_id, h5_base, cam_t="og", save_images=False, sim_step
     # Joint angles are normalized to [-1, 1] using Panda joint limits so the action format
     # matches what MimicGen expects (it clips all arm actions to [-1, 1] in waypoint.py:386).
     # env.step denormalizes back to radians before applying PD control.
-    from mg_blockpap_interface import normalize_joints
+    from mg_panda_kinematics import normalize_joints
     # Do not use joint_action (known noisy in some trajectories).
     # Infer open / close from continuous widths in ee_pose (preferred) or joint_pos.
     gripper_cmd = infer_gripper_cmd(joint_pos, ee_pose_raw, threshold=0.04)

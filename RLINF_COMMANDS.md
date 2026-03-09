@@ -66,6 +66,15 @@ bash examples/embodiment/eval_embodiment.sh libero_goal_ppo_openpi LIBERO # og
 
 ## BlockPAP-v1
 
+优化成功判定：
+
+* XY 对准：物块中心与杯垫中心的水平距离 < COASTER_RADIUS = 0.043 m
+* Z 高度：物块中心 Z 在期望落点 ± 0.02m，期望 Z = TABLE_Z + COASTER_THICKNESS + BLOCK_HALF_SIZE[2]
+* 竖直度：有四元数计算得到倾角 ≤ 20°（up_z > cos(20°) ≈ 0.940）
+* 线速度：‖cube.linear_velocity‖ < 0.05 m/s
+* 角速度：‖cube.angular_velocity‖ < 0.5 rad/s
+* 夹爪已张开：左指关节 + 右指关节 qpos[7] + qpos[8] > 0.03 m
+
 同时渲染初始化位置和大约在第 12s 时的两个图像，并与真机照片对比。
 
 `CAM_T` 当前默认使用手眼标定的内外参的平移向量 "og"，其中内参矩阵的光心 `cx, cy` 经过微调，也可以选用手动对齐机器人基座的 "0302"。

@@ -113,7 +113,7 @@ class PickAndPlaceEnv(BaseEnv):
     # _COASTER_CENTER_X = _TABLE_CENTER_X - 0.01
     # _COASTER_CENTER_Y = 0.059
     COASTER_RADIUS = 0.043
-    COASTER_HALF_THICKNESS = 0.002
+    COASTER_THICKNESS = 0.002
 
     # 长方体物块
     # _BLOCK_CENTER_X = _TABLE_CENTER_X - 0.076
@@ -309,12 +309,12 @@ class PickAndPlaceEnv(BaseEnv):
         self.target = actors.build_cylinder(
             self.scene,
             radius=self.COASTER_RADIUS,
-            half_length=self.COASTER_HALF_THICKNESS,
+            half_length=self.COASTER_THICKNESS,
             color=[0.0, 0.8, 0.2, 1.0],
             name="target_coaster",
             body_type="static",
             initial_pose=sapien.Pose(
-                p=[self._TABLE_CENTER_X, 0.0, self.TABLE_Z + self.COASTER_HALF_THICKNESS],
+                p=[self._TABLE_CENTER_X, 0.0, self.TABLE_Z + self.COASTER_THICKNESS],
                 q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]  # 绕 Y 轴旋转 90 度
             ),
         )
@@ -374,7 +374,7 @@ class PickAndPlaceEnv(BaseEnv):
             cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
             self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
 
-            coaster_pos = [coaster_x, coaster_y, self.TABLE_Z + self.COASTER_HALF_THICKNESS]
+            coaster_pos = [coaster_x, coaster_y, self.TABLE_Z + self.COASTER_THICKNESS]
             self.target.set_pose(
                 sapien.Pose(
                     p=coaster_pos,
@@ -389,19 +389,30 @@ class PickAndPlaceEnv(BaseEnv):
         dist_xy    = torch.norm(cube_pos[:, :2] - target_pos[:, :2], dim=1)
         # XY: block centre must be within coaster radius
         # Z:  block centre should be near coaster top + block half-height (±2 cm tolerance)
-        expected_z = target_pos[:, 2] + self.COASTER_HALF_THICKNESS + self.BLOCK_HALF_SIZE[2]
+        expected_z = target_pos[:, 2] + self.COASTER_THICKNESS + self.BLOCK_HALF_SIZE[2]
         xy_ok = dist_xy < self.COASTER_RADIUS
         z_ok  = torch.abs(cube_pos[:, 2] - expected_z) < 0.02
 
         # Upright check: local +Z axis should stay close to world +Z.
         # For quaternion [w, x, y, z], the world z-component of local z-axis is:
-        # up_z = 1 - 2 * (x^2 + y^2). Require tilt <= 25 deg.
+        # up_z = 1 - 2 * (x^2 + y^2). Require tilt <= 20 deg.
         x = cube_quat[:, 1]
         y = cube_quat[:, 2]
         up_z = 1.0 - 2.0 * (x * x + y * y)
-        upright_ok = up_z > np.cos(np.deg2rad(25.0))
+        upright_ok = up_z > np.cos(np.deg2rad(20.0))
 
-        return {"success": xy_ok & z_ok & upright_ok}
+        # Block must be stationary: prevents spurious success when the block is
+        # momentarily on the coaster but still moving / about to topple.
+        lin_vel = self.cube.linear_velocity   # (B, 3)
+        ang_vel = self.cube.angular_velocity  # (B, 3)
+        vel_ok    = torch.norm(lin_vel, dim=1) < 0.05   # < 5 cm/s
+        angvel_ok = torch.norm(ang_vel, dim=1) < 0.5    # < 0.5 rad/s
+
+        # Gripper must be open: robot has released the block before success fires.
+        qpos = self.agent.robot.get_qpos()  # (B, 9): joints 7&8 are fingers
+        gripper_open = (qpos[:, 7] + qpos[:, 8]) > 0.03  # combined > 3 cm
+
+        return {"success": xy_ok & z_ok & upright_ok & vel_ok & angvel_ok & gripper_open}
 
     def compute_dense_reward(self, obs, action, info):
         cube_pos   = self.cube.pose.p

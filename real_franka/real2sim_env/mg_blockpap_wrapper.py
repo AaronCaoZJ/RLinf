@@ -205,7 +205,7 @@ class EnvManiskillBlockPAP(EnvBase):
         # Restore coaster pose (present in 28D states from generation mode)
         if len(s) >= 28:
             base_env = self._base_env
-            coaster_z = base_env.TABLE_Z + base_env.COASTER_HALF_THICKNESS
+            coaster_z = base_env.TABLE_Z + base_env.COASTER_THICKNESS
             import numpy as _np
             self._base_env.target.set_pose(sapien.Pose(
                 p=[s[25], s[26], coaster_z],

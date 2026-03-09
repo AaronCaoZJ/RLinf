@@ -9,17 +9,26 @@ Given --output /path/to/blockpap_gen.hdf5, the script automatically writes:
   /path/to/blockpap_gen.hdf5          successful demos
   /path/to/blockpap_gen_failed.hdf5   failed demos
 
-Usage:
+Multi-GPU usage (4 workers across GPUs 0-3):
     cd /workspace1/zhijun/RLinf
+    python real_franka/real2sim_env/mg_generate_blockpap_data.py \
+        --src         .../blockpap_src.hdf5 \
+        --output      .../blockpap_gen.hdf5 \
+        --num-demos   200 \
+        --num-workers 4 \
+        --gpu-ids     0,1,2,3 \
+        --video-success .../success.mp4 \
+        --video-failed  .../failed.mp4
+
+Single-GPU usage:
     python real_franka/real2sim_env/mg_generate_blockpap_data.py \
         --src    .../blockpap_src.hdf5 \
         --output .../blockpap_gen.hdf5 \
-        --num-demos 50 \
-        --video-success .../success.mp4 \
-        --video-failed  .../failed.mp4
+        --num-demos 50
 """
 import argparse
 import json
+import multiprocessing
 import os
 import sys
 import traceback
@@ -137,6 +146,166 @@ def write_demos_to_hdf5(path, results, env):
                 ep_grp["datagen_info"].attrs["env_interface_type"] = "maniskill"
 
 
+def _merge_hdf5_files(output_path, input_paths):
+    """
+    Merge per-worker temp HDF5 files into a single output file.
+
+    Copies all demo groups from each input file, renumbering them
+    sequentially as demo_0, demo_1, ... in the merged output.
+    env_args is taken from the first non-empty input file.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with h5py.File(output_path, "w") as f_out:
+        data_grp = f_out.create_group("data")
+        demo_idx = 0
+        env_args_written = False
+        for in_path in input_paths:
+            if not os.path.exists(in_path):
+                continue
+            with h5py.File(in_path, "r") as f_in:
+                if "data" not in f_in:
+                    continue
+                if not env_args_written and "env_args" in f_in["data"].attrs:
+                    data_grp.attrs["env_args"] = f_in["data"].attrs["env_args"]
+                    env_args_written = True
+                for dk in sorted(f_in["data"].keys()):
+                    f_in.copy(f"data/{dk}", data_grp, name=f"demo_{demo_idx}")
+                    demo_idx += 1
+        data_grp.attrs["total"] = demo_idx
+    return demo_idx
+
+
+def _worker_generate(
+    rank,
+    gpu_id,
+    target_demos,
+    max_attempts,
+    src_path,
+    out_success,
+    out_failed,
+    cam_t,
+    use_image_obs,
+    cam_name,
+    video_skip,
+    traj_id_to_src_idx,
+    demo_keys,
+):
+    """
+    Worker function for multi-GPU parallel generation.
+
+    Sets CUDA_VISIBLE_DEVICES to isolate this process to one GPU, then
+    runs the full generation loop and writes results to temp HDF5 files.
+    """
+    # Isolate this worker to a single GPU before any CUDA initialization
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    # Each worker needs its own sys.path entry (spawn starts fresh)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    import mg_blockpap_interface  # noqa: F401
+    import pick_and_place as _pap  # noqa: F401
+
+    from mimicgen.configs.task_spec import MG_TaskSpec
+    from mimicgen.datagen.data_generator import DataGenerator
+    from mimicgen.env_interfaces.base import make_interface
+    from mg_blockpap_wrapper import EnvManiskillBlockPAP
+    import json, h5py, numpy as np, traceback
+    import robomimic.utils.tensor_utils as TensorUtils
+
+    print(f"[Worker {rank}] GPU={gpu_id}, target={target_demos} demos")
+
+    _pap.TRAJ_ID = "random"
+
+    task_spec = create_task_spec()
+
+    env = EnvManiskillBlockPAP(
+        env_name="BlockPAP-v1",
+        render=False,
+        render_offscreen=use_image_obs,
+        use_image_obs=use_image_obs,
+        cam_t=cam_t,
+    )
+
+    env_interface = make_interface(
+        name="MG_BlockPAP",
+        interface_type="maniskill",
+        env=env.base_env,
+    )
+
+    data_gen = DataGenerator(
+        task_spec=task_spec,
+        dataset_path=src_path,
+        demo_keys=demo_keys,
+    )
+
+    # Monkey-patch select_source_demo to force nearest-config source demo
+    _orig_select = data_gen.select_source_demo
+
+    def _forced_select(eef_pose, object_pose, subtask_ind, src_subtask_inds,
+                       subtask_object_name, selection_strategy_name,
+                       selection_strategy_kwargs=None):
+        forced_tid = getattr(env.base_env, "_nearest_traj_id", None)
+        if forced_tid is not None and forced_tid in traj_id_to_src_idx:
+            return traj_id_to_src_idx[forced_tid]
+        return _orig_select(
+            eef_pose=eef_pose, object_pose=object_pose,
+            subtask_ind=subtask_ind, src_subtask_inds=src_subtask_inds,
+            subtask_object_name=subtask_object_name,
+            selection_strategy_name=selection_strategy_name,
+            selection_strategy_kwargs=selection_strategy_kwargs,
+        )
+
+    data_gen.select_source_demo = _forced_select
+
+    generated = []
+    failed    = []
+    num_attempts = 0
+    camera_names = [cam_name] if use_image_obs else None
+
+    while len(generated) < target_demos:
+        num_attempts += 1
+        try:
+            result = data_gen.generate(
+                env=env,
+                env_interface=env_interface,
+                select_src_per_subtask=False,
+                transform_first_robot_pose=True,
+                interpolate_from_last_target_pose=True,
+                video_writer=None,
+                video_skip=video_skip,
+                camera_names=camera_names,
+            )
+            if result["success"]:
+                generated.append(result)
+                nearest_tid = getattr(env.base_env, "_nearest_traj_id", "?")
+                src_idx = traj_id_to_src_idx.get(nearest_tid, "?")
+                print(f"[Worker {rank}] [{len(generated)}/{target_demos}] Success "
+                      f"(attempt {num_attempts}, T={len(result['actions'])}, "
+                      f"nearest_traj={nearest_tid}, src_demo={src_idx})")
+            else:
+                if len(result["states"]) > 0:
+                    failed.append(result)
+                if num_attempts % 10 == 0:
+                    print(f"[Worker {rank}] Attempt {num_attempts}: failed "
+                          f"({len(generated)}/{target_demos} so far)")
+        except Exception as e:
+            print(f"[Worker {rank}] Attempt {num_attempts}: error - {e}")
+            traceback.print_exc()
+
+        if num_attempts >= max_attempts:
+            print(f"[Worker {rank}] Reached max attempts ({num_attempts}). "
+                  f"Generated {len(generated)}/{target_demos} demos.")
+            break
+
+    # Write per-worker temp HDF5 files
+    write_demos_to_hdf5(out_success, generated, env)
+    write_demos_to_hdf5(out_failed,  failed,    env)
+
+    env.env.close()
+    print(f"[Worker {rank}] Done: {len(generated)} success, {len(failed)} failed "
+          f"in {num_attempts} attempts.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--src",           type=str, required=True)
@@ -158,10 +327,27 @@ def main():
                         help="Render every Nth frame during replay (default: 1)")
     parser.add_argument("--num-render",    type=int, default=None,
                         help="Max demos to include in each video (default: all)")
+    parser.add_argument("--render-seed",   type=int, default=None,
+                        help="Random seed for video demo sampling (default: non-deterministic)")
+    parser.add_argument("--num-workers",   type=int, default=1,
+                        help="Number of parallel generation workers (default: 1)")
+    parser.add_argument("--gpu-ids",       type=str, default=None,
+                        help="Comma-separated GPU IDs for workers, e.g. '0,1,2,3'. "
+                             "Defaults to 0,1,...,num_workers-1")
     args = parser.parse_args()
 
     # Derive failed HDF5 path automatically from --output
     output_failed = _failed_path(args.output)
+
+    # Parse GPU IDs
+    if args.gpu_ids is not None:
+        gpu_ids = [int(x) for x in args.gpu_ids.split(",")]
+    else:
+        gpu_ids = list(range(args.num_workers))
+
+    if len(gpu_ids) < args.num_workers:
+        # Cycle GPUs if fewer IDs than workers
+        gpu_ids = [gpu_ids[i % len(gpu_ids)] for i in range(args.num_workers)]
 
     task_spec = create_task_spec()
     print(f"Task spec: {len(task_spec.spec)} subtasks")
@@ -181,28 +367,7 @@ def main():
         )
     print(f"Parsed {len(datagen_infos)} source demos with subtask indices")
 
-    pick_and_place.TRAJ_ID = "random"
-
-    from mg_blockpap_wrapper import EnvManiskillBlockPAP
-    env = EnvManiskillBlockPAP(
-        env_name="BlockPAP-v1",
-        render=False,
-        render_offscreen=args.use_image_obs,
-        use_image_obs=args.use_image_obs,
-        cam_t=args.cam_t,
-    )
-    print(f"Created environment: {env.name}")
-
-    env_interface = make_interface(
-        name="MG_BlockPAP",
-        interface_type="maniskill",
-        env=env.base_env,
-    )
-    print(f"Created env interface: {env_interface}")
-
-    # ── 建立 traj_id → source demo index 映射 ──────────────────────────────
-    # 源 HDF5 按 --trajs 顺序写入 demo_0, demo_1, ...，每个 demo 的
-    # real_traj_id 属性记录了对应的轨迹 ID（"0", "15", "25", "40", "45"）。
+    # Build traj_id → source demo index mapping (shared across workers)
     traj_id_to_src_idx = {}
     with h5py.File(args.src, "r") as f_src:
         for i, dk in enumerate(sorted(f_src["data"].keys())):
@@ -211,122 +376,192 @@ def main():
                 traj_id_to_src_idx[str(real_tid)] = i
     print(f"Traj ID → source demo index mapping: {traj_id_to_src_idx}")
 
-    data_gen = DataGenerator(
-        task_spec=task_spec,
-        dataset_path=args.src,
-        demo_keys=demo_keys,
-    )
+    # ── Multi-GPU parallel generation ─────────────────────────────────────────
+    if args.num_workers > 1:
+        print(f"\nLaunching {args.num_workers} workers on GPUs {gpu_ids[:args.num_workers]}")
 
-    # ── Monkey-patch select_source_demo 以强制使用最近配置对应的源轨迹 ────
-    _orig_select = data_gen.select_source_demo
+        # Split target demos evenly across workers
+        base_demos = args.num_demos // args.num_workers
+        remainder  = args.num_demos % args.num_workers
+        targets = [base_demos + (1 if i < remainder else 0)
+                   for i in range(args.num_workers)]
 
-    def _forced_select(eef_pose, object_pose, subtask_ind, src_subtask_inds,
-                       subtask_object_name, selection_strategy_name,
-                       selection_strategy_kwargs=None):
-        """Override: always use the source demo matching the nearest traj config."""
-        forced_tid = getattr(env.base_env, "_nearest_traj_id", None)
-        if forced_tid is not None and forced_tid in traj_id_to_src_idx:
-            return traj_id_to_src_idx[forced_tid]
-        # Fallback to original selection if no mapping found
-        return _orig_select(
-            eef_pose=eef_pose, object_pose=object_pose,
-            subtask_ind=subtask_ind, src_subtask_inds=src_subtask_inds,
-            subtask_object_name=subtask_object_name,
-            selection_strategy_name=selection_strategy_name,
-            selection_strategy_kwargs=selection_strategy_kwargs,
+        # Temp file paths per worker
+        base, ext = os.path.splitext(args.output)
+        temp_success = [f"{base}_worker{i}{ext}"          for i in range(args.num_workers)]
+        temp_failed  = [f"{base}_worker{i}_failed{ext}"   for i in range(args.num_workers)]
+
+        ctx = multiprocessing.get_context("spawn")
+        procs = []
+        for rank in range(args.num_workers):
+            p = ctx.Process(
+                target=_worker_generate,
+                args=(
+                    rank,
+                    gpu_ids[rank],
+                    targets[rank],
+                    args.max_attempts,
+                    args.src,
+                    temp_success[rank],
+                    temp_failed[rank],
+                    args.cam_t,
+                    args.use_image_obs,
+                    args.cam_name,
+                    args.video_skip,
+                    traj_id_to_src_idx,
+                    demo_keys,
+                ),
+                daemon=False,
+            )
+            p.start()
+            procs.append(p)
+
+        for p in procs:
+            p.join()
+
+        # Merge temp files
+        print(f"\nMerging worker outputs → {args.output}")
+        n_success = _merge_hdf5_files(args.output,      temp_success)
+        n_failed  = _merge_hdf5_files(output_failed,    temp_failed)
+
+        # Clean up temp files
+        for path in temp_success + temp_failed:
+            if os.path.exists(path):
+                os.remove(path)
+
+        print(f"Merged: {n_success} successful, {n_failed} failed demos.")
+
+    # ── Single-GPU generation ──────────────────────────────────────────────────
+    else:
+        pick_and_place.TRAJ_ID = "random"
+
+        from mg_blockpap_wrapper import EnvManiskillBlockPAP
+        env = EnvManiskillBlockPAP(
+            env_name="BlockPAP-v1",
+            render=False,
+            render_offscreen=args.use_image_obs,
+            use_image_obs=args.use_image_obs,
+            cam_t=args.cam_t,
+        )
+        print(f"Created environment: {env.name}")
+
+        env_interface = make_interface(
+            name="MG_BlockPAP",
+            interface_type="maniskill",
+            env=env.base_env,
+        )
+        print(f"Created env interface: {env_interface}")
+
+        data_gen = DataGenerator(
+            task_spec=task_spec,
+            dataset_path=args.src,
+            demo_keys=demo_keys,
         )
 
-    data_gen.select_source_demo = _forced_select
+        # Monkey-patch select_source_demo to force nearest-config source demo
+        _orig_select = data_gen.select_source_demo
 
-    generated = []  # successful results
-    failed    = []  # failed results
-    num_attempts = 0
-
-    camera_names = [args.cam_name] if args.use_image_obs else None
-    if camera_names:
-        print(f"Image obs enabled: camera={camera_names}")
-
-    print(f"\nGenerating {args.num_demos} demonstrations (no live rendering)...")
-    while len(generated) < args.num_demos:
-        num_attempts += 1
-
-        try:
-            # data_gen.generate() calls env.reset() internally, which sets
-            # env.base_env._nearest_traj_id to the nearest config.
-            # Our patched select_source_demo forces the matching source demo.
-            result = data_gen.generate(
-                env=env,
-                env_interface=env_interface,
-                select_src_per_subtask=False,
-                transform_first_robot_pose=True,
-                interpolate_from_last_target_pose=True,
-                video_writer=None,
-                video_skip=args.video_skip,
-                camera_names=camera_names,
+        def _forced_select(eef_pose, object_pose, subtask_ind, src_subtask_inds,
+                           subtask_object_name, selection_strategy_name,
+                           selection_strategy_kwargs=None):
+            """Override: always use the source demo matching the nearest traj config."""
+            forced_tid = getattr(env.base_env, "_nearest_traj_id", None)
+            if forced_tid is not None and forced_tid in traj_id_to_src_idx:
+                return traj_id_to_src_idx[forced_tid]
+            return _orig_select(
+                eef_pose=eef_pose, object_pose=object_pose,
+                subtask_ind=subtask_ind, src_subtask_inds=src_subtask_inds,
+                subtask_object_name=subtask_object_name,
+                selection_strategy_name=selection_strategy_name,
+                selection_strategy_kwargs=selection_strategy_kwargs,
             )
 
-            # result["initial_state"] is already set by data_gen.generate()
+        data_gen.select_source_demo = _forced_select
 
-            if result["success"]:
-                generated.append(result)
-                nearest_tid = getattr(env.base_env, "_nearest_traj_id", "?")
-                src_idx = traj_id_to_src_idx.get(nearest_tid, "?")
-                print(f"  [{len(generated)}/{args.num_demos}] Success "
-                      f"(attempt {num_attempts}, T={len(result['actions'])}, "
-                      f"nearest_traj={nearest_tid}, src_demo={src_idx})")
-            else:
-                if len(result["states"]) > 0:
-                    failed.append(result)
-                if num_attempts % 10 == 0:
-                    print(f"  Attempt {num_attempts}: failed "
-                          f"({len(generated)}/{args.num_demos} so far)")
+        generated = []
+        failed    = []
+        num_attempts = 0
 
-        except Exception as e:
-            print(f"  Attempt {num_attempts}: error - {e}")
-            traceback.print_exc()
+        camera_names = [args.cam_name] if args.use_image_obs else None
+        if camera_names:
+            print(f"Image obs enabled: camera={camera_names}")
 
-        if num_attempts >= args.max_attempts:
-            print(f"\nReached max attempts ({num_attempts}). "
-                  f"Generated {len(generated)}/{args.num_demos} demos.")
-            break
+        print(f"\nGenerating {args.num_demos} demonstrations (no live rendering)...")
+        while len(generated) < args.num_demos:
+            num_attempts += 1
 
-    # ── Write HDF5 files ──────────────────────────────────────────────────────
-    print(f"\nWriting {len(generated)} successful demos to {args.output}")
-    write_demos_to_hdf5(args.output, generated, env)
+            try:
+                result = data_gen.generate(
+                    env=env,
+                    env_interface=env_interface,
+                    select_src_per_subtask=False,
+                    transform_first_robot_pose=True,
+                    interpolate_from_last_target_pose=True,
+                    video_writer=None,
+                    video_skip=args.video_skip,
+                    camera_names=camera_names,
+                )
 
-    print(f"Writing {len(failed)} failed demos to {output_failed}")
-    write_demos_to_hdf5(output_failed, failed, env)
+                if result["success"]:
+                    generated.append(result)
+                    nearest_tid = getattr(env.base_env, "_nearest_traj_id", "?")
+                    src_idx = traj_id_to_src_idx.get(nearest_tid, "?")
+                    print(f"  [{len(generated)}/{args.num_demos}] Success "
+                          f"(attempt {num_attempts}, T={len(result['actions'])}, "
+                          f"nearest_traj={nearest_tid}, src_demo={src_idx})")
+                else:
+                    if len(result["states"]) > 0:
+                        failed.append(result)
+                    if num_attempts % 10 == 0:
+                        print(f"  Attempt {num_attempts}: failed "
+                              f"({len(generated)}/{args.num_demos} so far)")
 
-    print(f"Done! Generated {len(generated)} demos in {num_attempts} attempts.")
-    print(f"Success rate: {len(generated)/num_attempts*100:.1f}%")
+            except Exception as e:
+                print(f"  Attempt {num_attempts}: error - {e}")
+                traceback.print_exc()
+
+            if num_attempts >= args.max_attempts:
+                print(f"\nReached max attempts ({num_attempts}). "
+                      f"Generated {len(generated)}/{args.num_demos} demos.")
+                break
+
+        # Write HDF5 files
+        print(f"\nWriting {len(generated)} successful demos to {args.output}")
+        write_demos_to_hdf5(args.output, generated, env)
+
+        print(f"Writing {len(failed)} failed demos to {output_failed}")
+        write_demos_to_hdf5(output_failed, failed, env)
+
+        print(f"Done! Generated {len(generated)} demos in {num_attempts} attempts.")
+        print(f"Success rate: {len(generated)/num_attempts*100:.1f}%")
+
+        env.env.close()
 
     # ── Post-generation replay videos ─────────────────────────────────────────
-    # Both success and failed use the same replay_hdf5_to_video function.
-    env.env.close()
-
     from mg_render_video import render_hdf5_to_video
 
-    need_video = (args.video_success is not None and len(generated) > 0) or \
-                 (args.video_failed is not None and len(failed) > 0)
+    need_video = (args.video_success is not None) or (args.video_failed is not None)
 
     if need_video:
         print("\nRendering replay videos...")
-        if args.video_success is not None and len(generated) > 0:
+        if args.video_success is not None:
             render_hdf5_to_video(
                 hdf5_path   = args.output,
                 video_path  = args.video_success,
                 cam_t       = args.cam_t,
                 video_skip  = args.video_skip,
                 num_renders = args.num_render,
+                seed        = args.render_seed,
             )
 
-        if args.video_failed is not None and len(failed) > 0:
+        if args.video_failed is not None:
             render_hdf5_to_video(
                 hdf5_path   = output_failed,
                 video_path  = args.video_failed,
                 cam_t       = args.cam_t,
                 video_skip  = args.video_skip,
                 num_renders = args.num_render,
+                seed        = args.render_seed,
             )
 
 

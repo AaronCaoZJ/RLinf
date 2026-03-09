@@ -5,18 +5,22 @@ Standalone video rendering script for BlockPAP-v1 generated HDF5 datasets.
 Replays saved states from an HDF5 file and writes a video — no physics
 simulation, just state restore + render (step_sim=False).
 
+Demos are randomly sampled (with optional --seed) rather than taken
+in order, so the video is a representative cross-section of the dataset.
+
 Usage (standalone):
     python mg_render_video.py \
         --hdf5   .../blockpap_gen.hdf5 \
         --video  .../output.mp4
 
-    # limit to first 10 demos, skip every other frame
+    # randomly sample 10 demos, skip every other frame
     python mg_render_video.py \
         --hdf5       .../blockpap_gen.hdf5 \
         --video      .../output.mp4 \
         --num-render 10 \
         --video-skip 2 \
-        --cam-t      og
+        --cam-t      og \
+        --seed       42
 
 API (called from another script):
     from mg_render_video import render_hdf5_to_video
@@ -26,12 +30,14 @@ API (called from another script):
         cam_t      = "og",
         video_skip = 1,
         num_renders = None,
+        seed        = None,
     )
 """
 import argparse
 import os
 import sys
 
+import cv2
 import h5py
 import numpy as np
 
@@ -46,6 +52,7 @@ def render_hdf5_to_video(
     cam_t="og",
     video_skip=1,
     num_renders=None,
+    seed=None,
 ):
     """
     Replay saved states from an HDF5 file and write to video.
@@ -55,7 +62,9 @@ def render_hdf5_to_video(
         video_path : output .mp4 path
         cam_t      : camera calibration preset ('og', '0302', '0303')
         video_skip : render every Nth frame (1 = all frames)
-        num_renders: max number of demos to render (None = all)
+        num_renders: max number of demos to render (None = all); demos are
+                     randomly sampled (sorted by key after sampling)
+        seed       : random seed for demo sampling (None = non-deterministic)
     """
     import imageio
     from mg_blockpap_wrapper import EnvManiskillBlockPAP
@@ -76,8 +85,10 @@ def render_hdf5_to_video(
     try:
         with h5py.File(hdf5_path, "r") as f:
             demo_keys = sorted(f["data"].keys())
-            if num_renders is not None:
-                demo_keys = demo_keys[:num_renders]
+            if num_renders is not None and num_renders < len(demo_keys):
+                rng = np.random.default_rng(seed)
+                demo_keys = rng.choice(demo_keys, size=num_renders, replace=False).tolist()
+                demo_keys = sorted(demo_keys)
             print(f"  Replaying {len(demo_keys)} demos → {video_path}")
             for dk in demo_keys:
                 states = f[f"data/{dk}/states"][:]
@@ -89,6 +100,13 @@ def render_hdf5_to_video(
                     env.reset_to({"states": state_vec}, step_sim=False)
                     frame = env.render(mode="rgb_array")
                     if frame is not None:
+                        frame = frame.copy()
+                        cv2.putText(frame, dk, (8, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3,
+                                    cv2.LINE_AA)
+                        cv2.putText(frame, dk, (8, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1,
+                                    cv2.LINE_AA)
                         writer.append_data(frame)
     finally:
         writer.close()
@@ -110,7 +128,9 @@ def main():
     parser.add_argument("--video-skip",  type=int, default=1,
                         help="Render every Nth frame (default: 1 = all)")
     parser.add_argument("--num-render",  type=int, default=None,
-                        help="Max demos to render (default: all)")
+                        help="Max demos to render, randomly sampled (default: all)")
+    parser.add_argument("--seed",        type=int, default=None,
+                        help="Random seed for demo sampling (default: non-deterministic)")
     args = parser.parse_args()
 
     render_hdf5_to_video(
@@ -119,6 +139,7 @@ def main():
         cam_t       = args.cam_t,
         video_skip  = args.video_skip,
         num_renders = args.num_render,
+        seed        = args.seed,
     )
 
 
