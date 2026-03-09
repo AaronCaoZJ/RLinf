@@ -102,7 +102,8 @@ HDF5 回放：
 
 ```bash
 python real_franka/real2sim_env/replay_traj.py \
-  --traj 15
+--traj 15 \
+--side-cam side_cam
 
 # delta 动作回放，效果应当一致
 python real_franka/real2sim_env/replay_delta.py

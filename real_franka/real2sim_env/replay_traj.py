@@ -68,19 +68,20 @@ def to_uint8_frame(frame) -> np.ndarray | None:
     return frame
 
 
-def capture_frame(env, base_env, side_cam_name: str | None = None) -> np.ndarray | None:
-    """Render main view; optionally concatenate a side sensor camera."""
+def capture_frame(env, base_env, side_cam_name: str | None = None) -> tuple:
+    """Render main view and optionally a side sensor camera.
+
+    Returns:
+        (front_frame, back_frame) where back_frame is None if side_cam_name is None.
+        Both are uint8 numpy arrays (H, W, 3) or None on failure.
+    """
     main = to_uint8_frame(env.render())
-    if main is None or side_cam_name is None:
-        return main
+    if side_cam_name is None:
+        return main, None
     obs = base_env.get_obs()
-    side = to_uint8_frame(obs["sensor_data"][side_cam_name]["rgb"])
-    if side is None:
-        return main
-    if main.shape[0] != side.shape[0]:
-        h = min(main.shape[0], side.shape[0])
-        main, side = main[:h], side[:h]
-    return np.concatenate([main, side], axis=1)
+    side_raw = obs.get("sensor_data", {}).get(side_cam_name, {}).get("rgb")
+    back = to_uint8_frame(side_raw) if side_raw is not None else None
+    return main, back
 
 
 # ── Hybrid replay core ─────────────────────────────────────────────────────
@@ -162,8 +163,9 @@ def main():
     parser.add_argument("--gripper-damping", type=float, default=100.0,
                         help="PD damping for gripper joints (keep ~100, not 2000)")
     parser.add_argument("--gripper-force-limit", type=float, default=500.0)
-    parser.add_argument("--side-view", action="store_true",
-                        help="Concatenate left-side camera view to output video")
+    parser.add_argument("--side-cam", type=str, default=None,
+                        help="Sensor camera name for back/side view (e.g. 'side_cam'). "
+                             "When set, saves a separate replay_back.mp4 alongside the front video.")
     parser.add_argument("--cam-t", type=str, default="og",
                         choices=["og", "0302", "0303"],
                         help="相机平移向量预设: 'og'（2026-02-15）、'0302'（2026-03-02）、'0303'（2026-03-03）")
@@ -210,13 +212,8 @@ def main():
 
     # ── Create env ───────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    env_id = "BlockPAP-v1"
-    side_cam_name = None
-    if args.side_view:
-        import RLinf.real_franka.real2sim_env.multiview_render as multiview_render  # noqa: F401
-        env_id = "BlockPAP-SideView-v1"
-        side_cam_name = "cam_side_left"
-    env = gym.make(env_id, obs_mode=args.obs_mode, render_mode=args.render_mode,
+    side_cam_name = args.side_cam  # e.g. "side_cam", or None
+    env = gym.make("BlockPAP-v1", obs_mode=args.obs_mode, render_mode=args.render_mode,
                    cam_t=args.cam_t)
     print(f"Camera _t preset: '{args.cam_t}'")
     obs, _ = env.reset()
@@ -246,25 +243,38 @@ def main():
     base_env.scene.step()
     base_env.scene.update_render()
 
-    frames = [capture_frame(env, base_env, side_cam_name)]
+    f0, b0 = capture_frame(env, base_env, side_cam_name)
+    front_frames = [f0] if f0 is not None else []
+    back_frames  = [b0] if b0 is not None else []
     print(f"Replaying {qpos.shape[0]} frames (sim_steps={args.sim_steps}) → {args.out}")
-    if args.side_view:
-        print(f"Side view enabled: {side_cam_name}")
+    if side_cam_name:
+        print(f"Back camera: '{side_cam_name}'")
 
     # ── Hybrid replay loop ───────────────────────────────────────────────
     for t in range(qpos.shape[0]):
         hybrid_step(base_env, qpos[t, :7], qpos[t, 7:9], sim_steps=args.sim_steps)
-        frame = capture_frame(env, base_env, side_cam_name)
-        if frame is not None:
-            frames.append(frame)
+        front, back = capture_frame(env, base_env, side_cam_name)
+        if front is not None:
+            front_frames.append(front)
+        if back is not None:
+            back_frames.append(back)
 
-    # ── Save video ───────────────────────────────────────────────────────
-    if not frames:
+    # ── Save front video ─────────────────────────────────────────────────
+    if not front_frames:
         raise RuntimeError("No frames captured – check render_mode / renderer")
 
-    imageio.mimsave(args.out, frames, fps=args.fps)
+    imageio.mimsave(args.out, front_frames, fps=args.fps)
+    print(f"Front: {len(front_frames)} frames @ {args.fps} fps → {args.out}")
+
+    # ── Save back video (if side cam was requested) ───────────────────────
+    if side_cam_name and back_frames:
+        out_dir = os.path.dirname(args.out)
+        out_back = os.path.join(out_dir, "replay_back.mp4")
+        imageio.mimsave(out_back, back_frames, fps=args.fps)
+        print(f"Back:  {len(back_frames)} frames @ {args.fps} fps → {out_back}")
+
     env.close()
-    print(f"Done. {len(frames)} frames @ {args.fps} fps → {args.out}")
+    print("Done.")
 
 
 if __name__ == "__main__":

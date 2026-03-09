@@ -32,6 +32,7 @@ class PandaHighFriction(Panda):
         ),
     )
 
+# front camera
 # 2026-02-15 19:16:38 - __main__ - INFO: 旋转矩阵是:
 #  [[ 0.02816316  0.2178868  -0.97556762]
 #  [ 0.99959024 -0.00114196  0.0286016 ]
@@ -43,6 +44,18 @@ class PandaHighFriction(Panda):
 # 2026-02-15 19:16:38 - __main__ - INFO: 四元数是：
 #  [ 0.55837595  0.54509737 -0.43449658 -0.44977537]
 
+# back camera
+# 2026-01-11 15:39:15 - __main__ - INFO: 旋转矩阵是:
+#  [[ 0.49248784 -0.28922532  0.82085592]
+#  [-0.868662   -0.10517417  0.4841123 ]
+#  [-0.0536847  -0.95146577 -0.30303605]]
+# 2026-01-11 15:39:15 - __main__ - INFO: 平移向量是:
+#  [[ 0.05115059]
+#  [-0.33471246]
+#  [ 0.25403179]]
+# 2026-01-11 15:39:15 - __main__ - INFO: 四元数是：
+#  [ 0.68932903 -0.41993274  0.27823114 -0.52064326]
+
 # Principal Point         : 333.961, 246.486
 # Focal Length            : 607.875, 607.719
 # Distortion Model        : Inverse Brown Conrady
@@ -51,7 +64,7 @@ class PandaHighFriction(Panda):
 
 USE_REF_12 = False  # 运行时由 __main__ 循环覆盖（False=t0, True=t12）
 CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需与 RENDER_BASE_DIR 中的子目录一致
-TRAJ_ID = "15"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
+TRAJ_ID = "0"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
 
 @register_env("BlockPAP-v1", max_episode_steps=600)
@@ -80,11 +93,24 @@ class PickAndPlaceEnv(BaseEnv):
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     # ── 标定参数（RealSense D435, 2026-02-15）─────────────────────────────
+    # 正面相机
     _R = np.array([
         [ 0.02816316,  0.21788680, -0.97556762],
         [ 0.99959024, -0.00114196,  0.02860160],
         [ 0.00511786, -0.97597338, -0.21782968],
     ])
+
+    #TODO 
+    # 侧后方相机参数还没有验证；
+    # 腕部相机参数还没有标定；
+    # 暂时先使用一个 front 相机 (external_cam) 视角，符合 RLinf-Co 做法
+    # 侧后方相机
+    _R2 = np.array([
+        [ 0.49248784, -0.28922532,  0.82085592],
+        [-0.86866200, -0.10517417,  0.48411230],
+        [-0.05368470, -0.95146577, -0.30303605],
+    ])
+    _t2 = np.array([0.05115059, -0.33471246, 0.25403179])
 
     _K = np.array([
         [607.875,   0.0,   348.961],
@@ -167,14 +193,18 @@ class PickAndPlaceEnv(BaseEnv):
         },
     }
 
-    def _make_cam_pose(self):
+    def _make_cam_pose(self, R, t):
         """
-        使用严格的 4x4 齐次变换矩阵生成相机位姿，避免 look_at 造成的微小偏差
+        使用严格的 4x4 齐次变换矩阵生成相机位姿，避免 look_at 造成的微小偏差。
+
+        Args:
+            R: (3,3) OpenCV 旋转矩阵（相机→世界）
+            t: (3,)  OpenCV 平移向量（相机原点在世界坐标系中）
         """
         # 1. 构造 OpenCV 约定下，相机在世界坐标系（机器人基座）中的变换矩阵
         T_cam_to_world = np.eye(4)
-        T_cam_to_world[:3, :3] = self._R
-        T_cam_to_world[:3, 3] = self._t
+        T_cam_to_world[:3, :3] = R
+        T_cam_to_world[:3, 3] = t
 
         # 2. 坐标系对齐：OpenCV (Z前, X右, Y下) -> SAPIEN (X前, Y左, Z上)
         T_cv_to_sapien = np.array([
@@ -189,18 +219,23 @@ class PickAndPlaceEnv(BaseEnv):
         p = T_sapien_cam_to_world[:3, 3]
         q_xyzw = Rotation.from_matrix(T_sapien_cam_to_world[:3, :3]).as_quat()
         q_wxyz = [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]
-        
+
         return sapien.Pose(p=p, q=q_wxyz)
 
     @property
     def _default_sensor_configs(self):
-        pose = self._make_cam_pose()
-        return [CameraConfig("external_cam", pose, 640, 480,
-                             near=0.01, far=10, intrinsic=self._K)]
+        pose_front = self._make_cam_pose(self._R,  self._t)
+        pose_side  = self._make_cam_pose(self._R2, self._t2)
+        return [
+            CameraConfig("external_cam", pose_front, 640, 480,
+                         near=0.01, far=10, intrinsic=self._K),
+            CameraConfig("side_cam",     pose_side,  640, 480,
+                         near=0.01, far=10, intrinsic=self._K),
+        ]
 
     @property
     def _default_human_render_camera_configs(self):
-        pose = self._make_cam_pose()
+        pose = self._make_cam_pose(self._R, self._t)
         return CameraConfig("render_camera", pose, 640, 480,
                             near=0.01, far=100, intrinsic=self._K,
                             shader_pack="default")
@@ -456,8 +491,7 @@ if __name__ == "__main__":
               f"cx={K_sim[0,2]:.6f} cy={K_sim[1,2]:.6f}")
         print(f" 相机世界位置={p_cam}")
 
-    def get_frame(obs):
-        cam_name = list(obs["sensor_data"].keys())[0]
+    def get_frame(obs, cam_name):
         img = obs["sensor_data"][cam_name]["rgb"]
         if len(img.shape) == 4:
             img = img[0]
@@ -472,28 +506,16 @@ if __name__ == "__main__":
         left = (iw - tw) // 2
         return img[top:top + th, left:left + tw]
 
-    # 依次渲染 t=0 和 t=12 两种情况
-    for use_ref_12 in [False, True]:
-        USE_REF_12 = use_ref_12   # 更新模块级变量，env.reset() 会读取新值
-        _REF_LABEL = "12" if USE_REF_12 else "0"
-        SAVE_DIR = f"{RENDER_BASE_DIR}/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
-        os.makedirs(SAVE_DIR, exist_ok=True)
+    def save_cam_outputs(init_frame, save_dir, cam_name, ref_path, step_frames_fn):
+        """渲染截图 + 对比图 + demo视频，存入 save_dir。
+        init_frame: 已经拷贝为 numpy 的初始帧（避免 GPU tensor 视图被后续 step 覆盖）
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        frame = init_frame
+        imageio.imwrite(os.path.join(save_dir, "BlockPAP-v1_screenshot.png"), frame)
+        print(f"✅ [{cam_name}] Screenshot saved → {save_dir}")
 
-        obs, _ = env.reset()
-
-        cube_p    = base_env.cube.pose.p[0].cpu().numpy()
-        coaster_p = base_env.target.pose.p[0].cpu().numpy()
-        print(f"\n[t={_REF_LABEL}s 初始化]")
-        print(f"  物块位置 : ({cube_p[0]:.4f}, {cube_p[1]:.4f}, {cube_p[2]:.4f})")
-        print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
-
-        frame = get_frame(obs)
-        imageio.imwrite(os.path.join(SAVE_DIR, "BlockPAP-v1_screenshot.png"), frame)
-        print(f"✅ Screenshot saved → {SAVE_DIR}")
-
-        # 叠加对比图：当前渲染图(50%) + 参考图(50%)
-        ref_path = f"/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
-        compare_path = os.path.join(SAVE_DIR, "BlockPAP-v1_compare.png")
+        compare_path = os.path.join(save_dir, "BlockPAP-v1_compare.png")
         if os.path.exists(ref_path):
             ref_img = imageio.imread(ref_path)
             if ref_img.ndim == 2:
@@ -506,19 +528,52 @@ if __name__ == "__main__":
             compare = (0.5 * center_crop(frame, h, w).astype(np.float32)
                      + 0.5 * center_crop(ref_img, h, w).astype(np.float32)).astype(np.uint8)
             imageio.imwrite(compare_path, compare)
-            print(f"✅ Compare image saved: {compare_path}")
+            print(f"✅ [{cam_name}] Compare image saved: {compare_path}")
         else:
-            print(f"⚠️ 参考图不存在，跳过对比图生成: {ref_path}")
+            print(f"⚠️ [{cam_name}] 参考图不存在，跳过对比图: {ref_path}")
 
-        frames = [frame]
+        frames = step_frames_fn(cam_name)
+        imageio.mimsave(os.path.join(save_dir, "BlockPAP-v1_demo.mp4"), frames, fps=20)
+        print(f"✅ [{cam_name}] Video saved → {save_dir}")
+
+    # 依次渲染 t=0 和 t=12 两种情况
+    for use_ref_12 in [False, True]:
+        USE_REF_12 = use_ref_12   # 更新模块级变量，env.reset() 会读取新值
+        _REF_LABEL = "12" if USE_REF_12 else "0"
+
+        obs, _ = env.reset()
+
+        cube_p    = base_env.cube.pose.p[0].cpu().numpy()
+        coaster_p = base_env.target.pose.p[0].cpu().numpy()
+        print(f"\n[t={_REF_LABEL}s 初始化]")
+        print(f"  物块位置 : ({cube_p[0]:.4f}, {cube_p[1]:.4f}, {cube_p[2]:.4f})")
+        print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
+
+        # GPU tensor 是原地更新的视图，每步立即转 numpy 拷贝，两个相机共用同一段轨迹
+        _CAMS = ["external_cam", "side_cam"]
+        video_frames = {cam: [get_frame(obs, cam)] for cam in _CAMS}
         for _ in range(60):
             action = env.action_space.sample()
-            obs, _, done, trunc, _ = env.step(action)
-            frames.append(get_frame(obs))
+            o, _, done, trunc, _ = env.step(action)
+            for cam in _CAMS:
+                video_frames[cam].append(get_frame(o, cam))
             if done or trunc:
                 break
 
-        imageio.mimsave(os.path.join(SAVE_DIR, "BlockPAP-v1_demo.mp4"), frames, fps=20)
-        print(f"✅ Video saved → {SAVE_DIR}")
+        def _step_frames(cam_name):
+            return video_frames[cam_name]
+
+        _REF_BASE = "/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot"
+
+        # ── 正面相机 → render/traj... ────────────────────────────────────
+        front_dir = f"{RENDER_BASE_DIR}/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
+        front_ref = f"{_REF_BASE}/front/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
+        # video_frames[cam][0] 是 reset 后立即拷贝的初始帧，用于截图和对比图
+        save_cam_outputs(video_frames["external_cam"][0], front_dir, "external_cam", front_ref, _step_frames)
+
+        # ── 侧后方相机 → render/side_cam/traj... ────────────────────────
+        back_dir  = f"{RENDER_BASE_DIR}/side_cam/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
+        back_ref  = f"{_REF_BASE}/back/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
+        save_cam_outputs(video_frames["side_cam"][0], back_dir, "side_cam", back_ref, _step_frames)
 
     env.close()

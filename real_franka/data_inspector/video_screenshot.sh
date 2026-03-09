@@ -6,12 +6,12 @@
 # BlockPAP_traj0_t12.png, BlockPAP_traj15_t12.png, BlockPAP_traj25_t12.png, BlockPAP_traj40_t12.png, BlockPAP_traj45_t12.png
 
 VIDEO_BASE="/storage/zhijun/real_franka/pick_and_place/videos"
-OUTPUT_DIR="/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot"
+OUTPUT_DIR="/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot/back"
 
 mkdir -p "$OUTPUT_DIR"
 
 for traj in 0 15 25 40 45; do
-    VIDEO="${VIDEO_BASE}/${traj}/1.mp4"
+    VIDEO="${VIDEO_BASE}/${traj}/2.mp4"
 
     # t=0: 初始化时刻
     ffmpeg -ss 00:00:00 \
