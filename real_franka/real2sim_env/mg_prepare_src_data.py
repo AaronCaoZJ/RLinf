@@ -296,8 +296,6 @@ def replay_and_extract(traj_id, h5_base, cam_t="og", save_images=False, sim_step
         is_grasped = gripper_total < 0.05
         grasped_flags.append(int(is_grasped))
 
-        # Lifted: grasped AND block z > 0.12 m, matches MG_BlockPAP.get_subtask_term_signals()
-
     record_timestep()
 
     # Replay loop

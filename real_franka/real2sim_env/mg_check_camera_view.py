@@ -28,12 +28,14 @@ def main():
                         help="Sample every N timesteps (default: 20)")
     parser.add_argument("--cols",  type=int, default=5,
                         help="Max images per row (default: 5)")
-    parser.add_argument("--cam",   type=str, default="external_cam_image",
-                        help="Obs key for camera images (default: external_cam_image)")
+    parser.add_argument("--cam",   type=str, default="external_cam",
+                        help="Camera name (default: external_cam); "
+                             "reads obs/{cam}_image from the HDF5")
     args = parser.parse_args()
 
+    obs_key = args.cam if args.cam.endswith("_image") else f"{args.cam}_image"
     with h5py.File(args.hdf5, "r") as f:
-        key = f"data/{args.demo}/obs/{args.cam}"
+        key = f"data/{args.demo}/obs/{obs_key}"
         if key not in f:
             available = list(f[f"data/{args.demo}/obs"].keys())
             raise KeyError(f"Key '{key}' not found. Available obs keys: {available}")

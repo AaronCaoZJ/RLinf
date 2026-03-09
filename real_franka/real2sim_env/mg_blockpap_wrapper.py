@@ -10,7 +10,7 @@ robomimic's EnvBase interface, which MimicGen relies on for:
   - Serializing env config via serialize()
 
 Usage:
-    from robomimic_maniskill_wrapper import EnvManiskillBlockPAP
+    from mg_blockpap_wrapper import EnvManiskillBlockPAP
 
     env = EnvManiskillBlockPAP(
         env_name="BlockPAP-v1",
@@ -33,11 +33,9 @@ import torch
 from robomimic.envs.env_base import EnvBase, EnvType
 import robomimic.utils.obs_utils as ObsUtils
 
-# Import joint normalization helpers so env.step can denormalize MimicGen actions.
-# (mg_blockpap_interface is on sys.path; import lazily to avoid circular deps.)
 def _denormalize_joints(norm7):
     """Denormalize 7D arm action from [-1, 1] → joint angles [rad]."""
-    from mg_blockpap_interface import denormalize_joints
+    from mg_panda_kinematics import denormalize_joints
     return denormalize_joints(norm7)
 
 # Ensure BlockPAP env is registered

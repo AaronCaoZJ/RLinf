@@ -148,6 +148,8 @@ def main():
     parser.add_argument("--cam-t",         type=str, default="og")
     parser.add_argument("--use-image-obs", action="store_true", default=False,
                         help="Collect and save image observations in HDF5")
+    parser.add_argument("--cam-name",      type=str, default="external_cam",
+                        help="Camera name used for image obs collection (default: external_cam)")
     parser.add_argument("--video-success", type=str, default=None,
                         help="Replay successful demos to this .mp4 (after generation)")
     parser.add_argument("--video-failed",  type=str, default=None,
@@ -181,7 +183,7 @@ def main():
 
     pick_and_place.TRAJ_ID = "random"
 
-    from mg_maniskill_wrapper import EnvManiskillBlockPAP
+    from mg_blockpap_wrapper import EnvManiskillBlockPAP
     env = EnvManiskillBlockPAP(
         env_name="BlockPAP-v1",
         render=False,
@@ -240,6 +242,10 @@ def main():
     failed    = []  # failed results
     num_attempts = 0
 
+    camera_names = [args.cam_name] if args.use_image_obs else None
+    if camera_names:
+        print(f"Image obs enabled: camera={camera_names}")
+
     print(f"\nGenerating {args.num_demos} demonstrations (no live rendering)...")
     while len(generated) < args.num_demos:
         num_attempts += 1
@@ -256,7 +262,7 @@ def main():
                 interpolate_from_last_target_pose=True,
                 video_writer=None,
                 video_skip=args.video_skip,
-                camera_names=None,
+                camera_names=camera_names,
             )
 
             # result["initial_state"] is already set by data_gen.generate()

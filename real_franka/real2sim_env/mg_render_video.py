@@ -58,7 +58,7 @@ def render_hdf5_to_video(
         num_renders: max number of demos to render (None = all)
     """
     import imageio
-    from mg_maniskill_wrapper import EnvManiskillBlockPAP
+    from mg_blockpap_wrapper import EnvManiskillBlockPAP
 
     os.makedirs(os.path.dirname(os.path.abspath(video_path)), exist_ok=True)
 
@@ -84,9 +84,8 @@ def render_hdf5_to_video(
                 for t, state_vec in enumerate(states):
                     if t % video_skip != 0:
                         continue
-                    # step_sim=True: scene.step() commits qpos to GPU FK buffers,
-                    # ensuring render is consistent. Gripper contact forces hold
-                    # the block in place when it is being grasped.
+                    # step_sim=False: skip physics, restore pose exactly as saved.
+                    # We do not want gravity to perturb the block between frames.
                     env.reset_to({"states": state_vec}, step_sim=False)
                     frame = env.render(mode="rgb_array")
                     if frame is not None:
