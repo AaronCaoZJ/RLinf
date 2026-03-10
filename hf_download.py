@@ -19,10 +19,10 @@ from huggingface_hub import snapshot_download
 # allow_patterns="*"
 
 # download libero dataset
-save_dir = "../hf_download/datasets/libero"
-repo_id = "physical-intelligence/libero"
-repo_type="dataset"
-allow_patterns="*"
+# save_dir = "../hf_download/datasets/libero"
+# repo_id = "physical-intelligence/libero"
+# repo_type="dataset"
+# allow_patterns="*"
 
 # download RLCo-maniskill-assets dataset
 # save_dir = "rlinf/envs/maniskill/assets"
@@ -35,6 +35,13 @@ allow_patterns="*"
 # repo_id = "RLinf/maniskill_assets"
 # repo_type="dataset"
 # allow_patterns="*"
+
+# download RLCo-Example-Mix-Data
+save_dir = "../hf_download/datasets/RLCo-Example-Mix-Data"
+repo_id = "RLinf/RLCo-Example-Mix-Data"
+repo_type="dataset"
+allow_patterns="*"
+
 
 snapshot_download(
   local_dir=save_dir,

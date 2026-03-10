@@ -207,6 +207,135 @@ def reset_to_state(base_env, state):
     base_env.scene.update_render()
 
 
+# ─── Cleaning ─────────────────────────────────────────────────────────────
+
+
+def _analyze_motion(ee_pose: np.ndarray, window_size: int = 5) -> np.ndarray:
+    """Compute per-frame motion score from ee_pose (T, 7or8)."""
+    T = len(ee_pose)
+    pos     = ee_pose[:, :3]
+    rot     = ee_pose[:, 3:6] if ee_pose.shape[1] == 7 else ee_pose[:, 3:7]
+    gripper = ee_pose[:, 6]   if ee_pose.shape[1] == 7 else ee_pose[:, 7]
+    score = np.zeros(T)
+    for i in range(T):
+        s, e = max(0, i - window_size), min(T, i + window_size + 1)
+        score[i] = (np.var(pos[s:e], axis=0).sum()
+                    + np.var(rot[s:e], axis=0).sum()
+                    + np.var(gripper[s:e]) * 10)
+    return score
+
+
+def _detect_static_segments(
+    ee_pose: np.ndarray,
+    pos_threshold: float     = 0.0005,
+    rot_threshold: float     = 0.005,
+    gripper_threshold: float = 0.0005,
+    min_static_frames: int   = 5,
+    motion_score_threshold: float = 0.0001,
+) -> np.ndarray:
+    """
+    Return a boolean mask (True = keep).  Removes interior segments where the
+    robot is nearly stationary for >= min_static_frames consecutive frames.
+    """
+    T = len(ee_pose)
+    if T == 0:
+        return np.ones(T, dtype=bool)
+
+    score   = _analyze_motion(ee_pose)
+    pos     = ee_pose[:, :3]
+    rot     = ee_pose[:, 3:6] if ee_pose.shape[1] == 7 else ee_pose[:, 3:7]
+    gripper = ee_pose[:, 6]   if ee_pose.shape[1] == 7 else ee_pose[:, 7]
+
+    pos_d     = np.linalg.norm(np.diff(pos,     axis=0), axis=1)
+    rot_d     = np.linalg.norm(np.diff(rot,     axis=0), axis=1)
+    gripper_d = np.abs(np.diff(gripper, axis=0))
+
+    is_static  = np.concatenate([[False],
+                                  (pos_d < pos_threshold)
+                                  & (rot_d < rot_threshold)
+                                  & (gripper_d < gripper_threshold)])
+    is_abnormal = is_static & (score < motion_score_threshold)
+
+    mask = np.ones(T, dtype=bool)
+    i = 0
+    while i < T:
+        if is_abnormal[i]:
+            j = i
+            while j < T and is_abnormal[j]:
+                j += 1
+            if (j - i) >= min_static_frames:
+                if not (
+                    (i > 0 and score[i - 1] > motion_score_threshold * 2)
+                    and (j < T and score[j] > motion_score_threshold * 2)
+                ):
+                    mask[i:j] = False
+            i = j
+        else:
+            i += 1
+    return mask
+
+
+def clean_demo(
+    demo: dict,
+    pos_threshold: float     = 0.0005,
+    rot_threshold: float     = 0.005,
+    gripper_threshold: float = 0.0005,
+    min_static_frames: int   = 5,
+    min_episode_length: int  = 20,
+) -> dict | None:
+    """
+    Remove interior near-static segments from a source demo, then discard
+    the demo if it becomes shorter than min_episode_length.
+
+    Uses obs_ee_pose (real robot, T×8: [x,y,z,qw,qx,qy,qz,gw]) as the
+    motion signal, matching real_data_convert.py's cleaning strategy.
+
+    Returns cleaned demo dict, or None if too short after cleaning.
+    """
+    ee_pose = demo["obs_ee_pose"]   # (T, 8)
+    mask    = _detect_static_segments(
+        ee_pose,
+        pos_threshold=pos_threshold,
+        rot_threshold=rot_threshold,
+        gripper_threshold=gripper_threshold,
+        min_static_frames=min_static_frames,
+    )
+
+    kept = int(mask.sum())
+    T    = len(mask)
+    print(f"    [clean] traj {demo['traj_id']}: T={T} → {kept} "
+          f"(removed {T - kept} static frames)")
+
+    if kept < min_episode_length:
+        print(f"    [clean] traj {demo['traj_id']}: discarded (too short: {kept} < {min_episode_length})")
+        return None
+
+    cleaned = {}
+    for key in ("actions", "states", "obs_joint_pos", "obs_ee_pose",
+                "eef_pose", "target_pose", "gripper_action",
+                "block_pose", "coaster_pose"):
+        cleaned[key] = demo[key][mask]
+
+    # Re-latch grasped after removing frames
+    grasped_raw = demo["grasped"][mask].copy()
+    if grasped_raw.any():
+        grasped_raw[np.argmax(grasped_raw):] = 1
+    cleaned["grasped"] = grasped_raw
+    cleaned["placed"]  = demo["placed"][mask]
+
+    # Re-evaluate success
+    T_new           = cleaned["actions"].shape[0]
+    tail            = max(1, T_new // 10)
+    grasp_any       = bool(cleaned["grasped"].any())
+    placed_tail_any = bool(cleaned["placed"][-tail:].any())
+    grasp_onset     = int(np.argmax(cleaned["grasped"])) if grasp_any else -1
+    place_onset     = int(np.argmax(cleaned["placed"]))  if cleaned["placed"].any() else -1
+    order_ok        = (place_onset >= 0) and (grasp_onset >= 0) and (grasp_onset <= place_onset)
+    cleaned["is_success"] = bool(placed_tail_any and grasp_any and order_ok)
+    cleaned["traj_id"]    = demo["traj_id"]
+    return cleaned
+
+
 # ─── Replay and extraction ────────────────────────────────────────────────
 
 
@@ -492,7 +621,7 @@ def main():
                         default="/storage/zhijun/real_franka/pick_and_place",
                         help="Base directory for real episode HDF5 files")
     parser.add_argument("--output", type=str,
-                        default="/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/blockpap_src.hdf5",
+                        default="/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/blockpap_cleaned_src.hdf5",
                         help="Output MimicGen source HDF5 path")
     parser.add_argument("--cam-t", type=str, default="og",
                         help="Camera calibration preset")
@@ -516,6 +645,10 @@ def main():
             save_images=args.save_images,
             sim_steps=args.sim_steps,
         )
+        demo = clean_demo(demo)
+        if demo is None:
+            print(f"  [SKIP] traj {traj_id} discarded after cleaning")
+            continue
         all_demos.append(demo)
 
     # Print per-trajectory success summary before filtering

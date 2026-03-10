@@ -1,7 +1,8 @@
 {
   "output_root": "/storage/zhijun/real_franka/lerobot_toy",
   "fps": 15,
-  "image_size": 224,
+  "image_height": 480,
+  "image_width": 640,
   "chunk_size": 1000,
   "use_last": false,
   "temp_clean_dir": "/storage/zhijun/real_franka/_temp_cleaned_toy",

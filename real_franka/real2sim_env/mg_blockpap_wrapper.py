@@ -64,10 +64,13 @@ class EnvManiskillBlockPAP(EnvBase):
         use_depth_obs=False,
         postprocess_visual_obs=False,
         cam_t="og",
+        image_cam_names=None,
         **kwargs,
     ):
         self._env_name = env_name
         self._cam_t = cam_t
+        # Which sensor cameras to include in image obs (None = all cameras)
+        self._image_cam_names = set(image_cam_names) if image_cam_names is not None else None
         self._init_kwargs = dict(
             env_name=env_name,
             cam_t=cam_t,
@@ -155,9 +158,11 @@ class EnvManiskillBlockPAP(EnvBase):
             coaster_p = coaster_p[0].cpu().numpy()
         di["coaster_pos"] = np.asarray(coaster_p).flatten()[:3].astype(np.float32)
 
-        # Images (optional)
+        # Images (optional); self._image_cam_names filters which cameras are collected
         if self._use_image_obs and isinstance(obs, dict) and "sensor_data" in obs:
             for cam_name, cam_data in obs["sensor_data"].items():
+                if self._image_cam_names is not None and cam_name not in self._image_cam_names:
+                    continue
                 img = cam_data["rgb"]
                 if hasattr(img, "cpu"):
                     img = img[0].cpu().numpy()

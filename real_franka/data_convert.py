@@ -272,11 +272,12 @@ def compute_actions_from_ee_pose(ee_pose: np.ndarray) -> Tuple[np.ndarray, np.nd
     # 2. 确定夹爪索引
     gripper_idx = 6 if dim == 7 else 7
 
-    # 3. Build state (7D)
-    states = np.zeros((T, 7), dtype=np.float32)
+    # 3. Build state (8D)
+    states = np.zeros((T, 8), dtype=np.float32)
     states[:, :3] = ee_pose[:, :3]
     states[:, 3:6] = euler_angles
-    states[:, 6] = ee_pose[:, gripper_idx]
+    states[:, 6] = ee_pose[:, gripper_idx] / 2
+    states[:, 7] = -ee_pose[:, gripper_idx] / 2
 
     # 4. Build actions (7D)
     actions = np.zeros((T, 7), dtype=np.float32)
@@ -307,18 +308,19 @@ def load_hdf5(hdf5_path: str):
 
         if "observations" in f and "images" in f["observations"]:
             imgs = f["observations"]["images"]
-            # image       ← camera_left_color  (正前方全景, 对应原始 1.mp4)
-            # wrist_image ← camera_wrist_color  (腕部俯视,   对应原始 0.mp4)
-            # camera_front_color 是侧后相机 (2.mp4), 不使用
-            if "camera_left_color" in imgs:
-                front_imgs = imgs["camera_left_color"][:]
-            elif "camera_front_color" in imgs:
+            if "camera_front_color" in imgs:
                 front_imgs = imgs["camera_front_color"][:]
             if "camera_wrist_color" in imgs:
                 wrist_imgs = imgs["camera_wrist_color"][:]
-            if front_imgs is None:
-                raise KeyError(f"Cannot find camera_left_color in {hdf5_path}")
-        # wrist camera is optional — missing ones will be filled with black frames
+            if "camera_left_color" in imgs:
+                left_imgs = imgs["camera_left_color"][:]
+
+        if front_imgs is None:
+            raise KeyError(f"Cannot find camera_front_color in {hdf5_path}")
+        if wrist_imgs is None:
+            raise KeyError(f"Cannot find camera_wrist_color in {hdf5_path}")
+        if left_imgs is None:
+            raise KeyError(f"Cannot find camera_left_color in {hdf5_path}")
 
         # Load timestamps
         timestamps = None
@@ -327,36 +329,27 @@ def load_hdf5(hdf5_path: str):
         elif "observations" in f and "timestamp" in f["observations"]:
             timestamps = f["observations"]["timestamp"][:]
 
-    # Truncate to minimum length across available streams
-    T = len(ee_pose)
-    if front_imgs is not None:
-        T = min(T, len(front_imgs))
-    if wrist_imgs is not None:
-        T = min(T, len(wrist_imgs))
+    # Truncate to minimum length
+    T = min(len(ee_pose), len(front_imgs), len(wrist_imgs), len(left_imgs))
     if timestamps is not None:
         T = min(T, len(timestamps))
 
-    front_imgs = front_imgs[:T]
-    # Fill missing optional cameras with black frames matching front camera shape
-    black = np.zeros_like(front_imgs)
-    wrist_imgs = wrist_imgs[:T] if wrist_imgs is not None else black
-
-    return ee_pose[:T], front_imgs, wrist_imgs, timestamps[:T] if timestamps is not None else None
+    return ee_pose[:T], front_imgs[:T], wrist_imgs[:T], left_imgs[:T], timestamps[:T] if timestamps is not None else None
 
 
 def build_episode_data(
     ee_pose: np.ndarray,
     front_imgs: np.ndarray,
     wrist_imgs: np.ndarray,
+    left_imgs: np.ndarray,
     timestamps: Optional[np.ndarray],
     episode_index: int,
     fps: float,
-    image_height: int,
-    image_width: int,
+    image_size: int,
     task_index: int = 0,
-    frame_offset: int = 0,
+    use_last: bool = False,
 ) -> dict:
-    """Build episode data as dict for HuggingFace datasets in LeRobot v2.1 format."""
+    """Build episode data as dict for HuggingFace datasets in Pi0.5 format."""
 
     T = len(ee_pose)
     states, actions = compute_actions_from_ee_pose(ee_pose)
@@ -366,107 +359,64 @@ def build_episode_data(
     else:
         timestamps = (timestamps - timestamps[0]).astype(np.float32)
 
-    num_workers = min(8, mp.cpu_count())
+    # ========== OPTIMIZED: Parallel batch resize ==========
+    num_workers = min(8, mp.cpu_count())  # 自动适配CPU核心数
 
-    def resize_batch(imgs, h, w):
+    def resize_batch(imgs, size, crop_params=None):
         def resize_single(img):
-            resized = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+            if crop_params:
+                x, y, c_size = crop_params
+                img = img[y : y + c_size, x : x + c_size]
+
+            # 执行缩放
+            resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
             return Image.fromarray(resized)
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             return list(executor.map(resize_single, imgs))
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            "front": executor.submit(resize_batch, front_imgs, image_height, image_width),
-            "wrist": executor.submit(resize_batch, wrist_imgs, image_height, image_width),
-        }
-        front_resized = futures["front"].result()
-        wrist_resized = futures["wrist"].result()
+    # TODO: 不进行剪裁
+    CROP_CONFIG = {"front": None, "wrist": None, "left": None}
+
+    if not use_last:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                "front": executor.submit(resize_batch, front_imgs, image_size, CROP_CONFIG["front"]),
+                "wrist": executor.submit(resize_batch, wrist_imgs, image_size, CROP_CONFIG["wrist"]),
+                "left": executor.submit(resize_batch, left_imgs, image_size, CROP_CONFIG["left"]),
+            }
+            front_resized = futures["front"].result()
+            wrist_resized = futures["wrist"].result()
+            left_resized = futures["left"].result()
+
+    else:
+        last_resized = cv2.resize(front_imgs[-1], (image_size, image_size), interpolation=cv2.INTER_AREA)
+        last_pil = Image.fromarray(last_resized)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                "front": executor.submit(resize_batch, front_imgs, image_size),
+                "wrist": executor.submit(resize_batch, wrist_imgs, image_size),
+            }
+            front_resized = futures["front"].result()
+            wrist_resized = futures["wrist"].result()
+
+        left_resized = [last_pil] * T
 
     data = {
         "image": front_resized,
         "wrist_image": wrist_resized,
+        "left_image": left_resized,
         "state": states.tolist(),
         "actions": actions.tolist(),
         "timestamp": timestamps.tolist(),
         "frame_index": np.arange(T, dtype=np.int64).tolist(),
         "episode_index": np.full(T, episode_index, dtype=np.int64).tolist(),
-        "index": np.arange(frame_offset, frame_offset + T, dtype=np.int64).tolist(),
+        "index": np.arange(T, dtype=np.int64).tolist(),
         "task_index": np.full(T, task_index, dtype=np.int64).tolist(),
     }
 
     return data
-
-
-def _image_channel_stats(pil_images: list) -> dict:
-    """Compute per-channel min/max/mean/std over a list of PIL images, normalized to [0,1]."""
-    n = len(pil_images)
-    C = 3
-    ch_min = np.full(C, np.inf, dtype=np.float64)
-    ch_max = np.full(C, -np.inf, dtype=np.float64)
-    ch_sum = np.zeros(C, dtype=np.float64)
-    ch_sum_sq = np.zeros(C, dtype=np.float64)
-
-    for img in pil_images:
-        arr = np.array(img, dtype=np.float32) / 255.0  # (H, W, C)
-        for c in range(C):
-            ch = arr[:, :, c]
-            ch_min[c] = min(ch_min[c], float(ch.min()))
-            ch_max[c] = max(ch_max[c], float(ch.max()))
-            ch_sum[c] += float(ch.mean())
-            ch_sum_sq[c] += float((ch ** 2).mean())
-
-    ch_mean = ch_sum / n
-    ch_std = np.sqrt(np.maximum(ch_sum_sq / n - ch_mean ** 2, 0.0))
-
-    def nested(arr):
-        return [[[float(v)]] for v in arr]
-
-    return {"min": nested(ch_min), "max": nested(ch_max),
-            "mean": nested(ch_mean), "std": nested(ch_std), "count": [n]}
-
-
-def compute_episode_stats(data: dict, episode_index: int) -> dict:
-    """Compute episodes_stats record for one episode."""
-    n = len(data["timestamp"])
-
-    def vec_stats(key):
-        arr = np.array(data[key], dtype=np.float64)  # (N, D)
-        return {"min": arr.min(0).tolist(), "max": arr.max(0).tolist(),
-                "mean": arr.mean(0).tolist(), "std": arr.std(0).tolist(), "count": [n]}
-
-    def scalar_stats(key):
-        arr = np.array(data[key], dtype=np.float64)
-        return {"min": [float(arr.min())], "max": [float(arr.max())],
-                "mean": [float(arr.mean())], "std": [float(arr.std())], "count": [n]}
-
-    img_stats = _image_channel_stats(data["image"])
-    wrist_stats = _image_channel_stats(data["wrist_image"])
-
-    return {
-        "episode_index": episode_index,
-        "stats": {
-            "observation.images.image": img_stats,
-            "observation.images.wrist_image": wrist_stats,
-            "image": img_stats,
-            "wrist_image": wrist_stats,
-            "state": vec_stats("state"),
-            "actions": vec_stats("actions"),
-            "timestamp": scalar_stats("timestamp"),
-            "frame_index": scalar_stats("frame_index"),
-            "episode_index": scalar_stats("episode_index"),
-            "index": scalar_stats("index"),
-            "task_index": scalar_stats("task_index"),
-        },
-    }
-
-
-def append_episode_stats(meta_dir: str, stats_record: dict):
-    os.makedirs(meta_dir, exist_ok=True)
-    path = os.path.join(meta_dir, "episodes_stats.jsonl")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(stats_record) + "\n")
 
 
 def save_episode_with_datasets(data: dict, out_path: str):
@@ -475,7 +425,8 @@ def save_episode_with_datasets(data: dict, out_path: str):
         {
             "image": ImageFeature(),
             "wrist_image": ImageFeature(),
-            "state": Sequence(Value("float32"), length=7),
+            "left_image": ImageFeature(),
+            "state": Sequence(Value("float32"), length=8),
             "actions": Sequence(Value("float32"), length=7),
             "timestamp": Value("float32"),
             "frame_index": Value("int64"),
@@ -488,29 +439,6 @@ def save_episode_with_datasets(data: dict, out_path: str):
     dataset = Dataset.from_dict(data, features=features)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     dataset.to_parquet(out_path)
-
-
-def _encode_video_from_pil(frames: list, path: str, fps: float, codec: str = "libx264", pix_fmt: str = "yuv420p"):
-    """Encode a list of PIL images to MP4 using ffmpeg."""
-    import subprocess
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    h, w = frames[0].size[1], frames[0].size[0]
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
-        "-r", str(fps),
-        "-i", "pipe:0",
-        "-vcodec", codec, "-pix_fmt", pix_fmt,
-        path,
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    for frame in frames:
-        proc.stdin.write(np.array(frame).tobytes())
-    proc.stdin.close()
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed for {path}")
 
 
 def write_tasks_jsonl(meta_dir: str, all_tasks: List[str]):
@@ -536,26 +464,15 @@ def write_info_json(
     total_tasks: int,
     fps: float,
     chunk_size: int,
-    image_height: int,
-    image_width: int,
+    image_size: int,
 ):
-    video_info = {
-        "video.height": int(image_height),
-        "video.width": int(image_width),
-        "video.codec": "libx264",
-        "video.pix_fmt": "yuv420p",
-        "video.is_depth_map": False,
-        "video.fps": float(fps),
-        "video.channels": 3,
-        "has_audio": False,
-    }
     info = {
-        "codebase_version": "v2.1",
-        "robot_type": "franka_panda",
+        "codebase_version": "v2.0",
+        "robot_type": "panda",
         "total_episodes": int(total_episodes),
         "total_frames": int(total_frames),
         "total_tasks": int(total_tasks),
-        "total_videos": int(total_episodes * 2),
+        "total_videos": 0,
         "total_chunks": int((total_episodes + chunk_size - 1) // chunk_size),
         "chunks_size": int(chunk_size),
         "fps": float(fps),
@@ -563,30 +480,15 @@ def write_info_json(
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
         "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         "features": {
-            "observation.images.image": {
-                "names": ["channel", "height", "width"],
-                "dtype": "video",
-                "shape": [3, int(image_height), int(image_width)],
-                "info": video_info,
+            "image": {"dtype": "image", "shape": [image_size, image_size, 3], "names": ["height", "width", "channel"]},
+            "wrist_image": {"dtype": "image", "shape": [image_size, image_size, 3], "names": ["height", "width", "channel"]},
+            "left_image": {"dtype": "image", "shape": [image_size, image_size, 3], "names": ["height", "width", "channel"]},
+            "state": {"dtype": "float32", "shape": [8], "names": ["x", "y", "z", "roll", "pitch", "yaw", "gripper", "gripper"]},
+            "actions": {
+                "dtype": "float32",
+                "shape": [7],
+                "names": ["delta_x", "delta_y", "delta_z", "delta_roll", "delta_pitch", "delta_yaw", "gripper"],
             },
-            "observation.images.wrist_image": {
-                "names": ["channel", "height", "width"],
-                "dtype": "video",
-                "shape": [3, int(image_height), int(image_width)],
-                "info": video_info,
-            },
-            "image": {
-                "dtype": "image",
-                "shape": [int(image_height), int(image_width), 3],
-                "names": ["height", "width", "channel"],
-            },
-            "wrist_image": {
-                "dtype": "image",
-                "shape": [int(image_height), int(image_width), 3],
-                "names": ["height", "width", "channel"],
-            },
-            "state": {"dtype": "float32", "shape": [7], "names": ["ee_pose_and_gripper_width"]},
-            "actions": {"dtype": "float32", "shape": [7], "names": ["delta_ee_pose_and_gripper_action"]},
             "timestamp": {"dtype": "float32", "shape": [1], "names": None},
             "frame_index": {"dtype": "int64", "shape": [1], "names": None},
             "episode_index": {"dtype": "int64", "shape": [1], "names": None},
@@ -607,10 +509,9 @@ def convert_cleaned_dataset(
     task_index: int,
     episode_offset: int,
     fps: float,
-    image_height: int,
-    image_width: int,
+    image_size: int,
     chunk_size: int,
-    episode_offset_frames: int = 0,
+    use_last: bool,
 ) -> Tuple[int, int, List[str]]:
     """
     Convert a single cleaned dataset to LeRobot format.
@@ -644,12 +545,6 @@ def convert_cleaned_dataset(
     total_frames = 0
     errors = []
 
-    # Clear episodes_stats.jsonl for this run (only if starting from offset 0)
-    if episode_offset == 0:
-        stats_path = os.path.join(meta_root, "episodes_stats.jsonl")
-        if os.path.exists(stats_path):
-            os.remove(stats_path)
-
     for local_idx, h5p in enumerate(tqdm(files, desc="Converting")):
         try:
             ep_idx = episode_offset + local_idx
@@ -658,22 +553,19 @@ def convert_cleaned_dataset(
             os.makedirs(chunk_dir, exist_ok=True)
 
             # Load data
-            ee_pose, front_imgs, wrist_imgs, timestamps = load_hdf5(h5p)
-
-            # frame_offset tracks the global frame index start for this episode
-            frame_offset = episode_offset_frames + total_frames
+            ee_pose, front_imgs, wrist_imgs, left_imgs, timestamps = load_hdf5(h5p)
 
             data = build_episode_data(
                 ee_pose=ee_pose,
                 front_imgs=front_imgs,
                 wrist_imgs=wrist_imgs,
+                left_imgs=left_imgs,
                 timestamps=timestamps,
                 episode_index=ep_idx,
                 fps=fps,
-                image_height=image_height,
-                image_width=image_width,
+                image_size=image_size,
                 task_index=task_index,
-                frame_offset=frame_offset,
+                use_last=use_last,
             )
 
             episode_length = len(data["timestamp"])
@@ -681,25 +573,6 @@ def convert_cleaned_dataset(
             # Save parquet
             parquet_path = os.path.join(chunk_dir, f"episode_{ep_idx:06d}.parquet")
             save_episode_with_datasets(data, parquet_path)
-
-            # Compute and append episodes_stats.jsonl
-            stats_record = compute_episode_stats(data, ep_idx)
-            append_episode_stats(meta_root, stats_record)
-
-            # Save videos
-            # observation.images.image       ← front camera  (data["image"],       camera_left_color)
-            # observation.images.wrist_image ← wrist camera  (data["wrist_image"], camera_wrist_color)
-            video_chunk_dir = os.path.join(output_root, "videos", f"chunk-{chunk_id:03d}")
-            _encode_video_from_pil(
-                data["image"],
-                os.path.join(video_chunk_dir, f"observation.images.image/episode_{ep_idx:06d}.mp4"),
-                fps=fps,
-            )
-            _encode_video_from_pil(
-                data["wrist_image"],
-                os.path.join(video_chunk_dir, f"observation.images.wrist_image/episode_{ep_idx:06d}.mp4"),
-                fps=fps,
-            )
 
             # Append to episodes.jsonl
             append_episode_meta(meta_root, ep_idx, length=episode_length, task_text=task_text)
@@ -737,9 +610,9 @@ def run_pipeline(config_path: str, skip_cleaning: bool = False, skip_conversion:
     # Extract parameters
     output_root = config["output_root"]
     fps = config.get("fps", 15)
-    image_height = config.get("image_height", 480)
-    image_width = config.get("image_width", 640)
+    image_size = config.get("image_size", 224)
     chunk_size = config.get("chunk_size", 1000)
+    use_last = config.get("use_last", False)
     datasets = config["datasets"]
 
     # TODO: Cleaning parameters
@@ -827,10 +700,9 @@ def run_pipeline(config_path: str, skip_cleaning: bool = False, skip_conversion:
                 task_index=task_index,
                 episode_offset=total_episodes,
                 fps=fps,
-                image_height=image_height,
-                image_width=image_width,
+                image_size=image_size,
                 chunk_size=chunk_size,
-                episode_offset_frames=total_frames,
+                use_last=use_last,
             )
 
             total_episodes += num_episodes
@@ -846,8 +718,7 @@ def run_pipeline(config_path: str, skip_cleaning: bool = False, skip_conversion:
             total_tasks=len(all_tasks),
             fps=fps,
             chunk_size=chunk_size,
-            image_height=image_height,
-            image_width=image_width,
+            image_size=image_size,
         )
 
     # Clean up temp directory
@@ -881,7 +752,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="/workspace1/zhijun/RLinf/real_franka/config/pick_and_place_config.json",
+        default="/scratch/e1583450/VLA_Flywheel/utils/dataset/1-convert_config.json",
         help="Path to pipeline config JSON",
     )
     parser.add_argument("--skip-cleaning", action="store_true", help="Skip cleaning step")
