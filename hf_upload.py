@@ -43,7 +43,7 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/blockpap_cleaned_mimicgen",
+        default="/workspace1/zhijun/mg_dataset/blockpap_cleaned_mimicgen",
         help="Local dataset directory to upload",
     )
     parser.add_argument(
