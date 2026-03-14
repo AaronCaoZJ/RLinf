@@ -94,6 +94,7 @@ def create_task_spec():
 # ── LeRobot v2.1 format helpers ───────────────────────────────────────────────
 
 _VIDEO_KEYS = ["observation.images.image", "observation.images.wrist_image"]
+_GRIPPER_OPEN_THRESHOLD_M = 0.04
 
 
 def _quat_sapien_to_scipy(q):
@@ -111,8 +112,13 @@ def _obs_list_to_state_action(obs_list):
     Convert a list of T obs dicts to LeRobot state/action arrays.
 
     State  (T, 7): [x, y, z, roll, pitch, yaw, gripper_width]
-    Action (T, 7): [Δx, Δy, Δz, Δroll, Δpitch, Δyaw, Δgripper]
+        Action (T, 7): [Δx, Δy, Δz, Δroll, Δpitch, Δyaw, gripper_abs01]
       (last action repeats second-to-last)
+
+        For pi0.5 training, keep arm motion as delta and encode gripper as
+        absolute binary command in {0, 1}. The gripper target for step t is
+        derived from the next state's width (t + 1), matching standard action
+        alignment in sequence datasets.
     """
     from scipy.spatial.transform import Rotation as _R
 
@@ -127,6 +133,7 @@ def _obs_list_to_state_action(obs_list):
     ], dtype=np.float32)
 
     gripper = jpos[:, 7] + jpos[:, 8]   # total width in meters (0 ~ 0.08)
+    gripper_abs01 = (gripper >= _GRIPPER_OPEN_THRESHOLD_M).astype(np.float32)
 
     states = np.zeros((T, 7), dtype=np.float32)
     states[:, :3] = ee_pos
@@ -137,7 +144,7 @@ def _obs_list_to_state_action(obs_list):
     for t in range(T - 1):
         actions[t, :3] = ee_pos[t + 1] - ee_pos[t]
         actions[t, 3:6] = _wrap_angle(euler[t + 1] - euler[t])
-        actions[t, 6]   = gripper[t + 1] - gripper[t]
+        actions[t, 6]   = gripper_abs01[t + 1]
     if T > 1:
         actions[-1] = actions[-2]
 

@@ -271,6 +271,7 @@ def compute_actions_from_ee_pose(ee_pose: np.ndarray) -> Tuple[np.ndarray, np.nd
 
     # 2. 确定夹爪索引
     gripper_idx = 6 if dim == 7 else 7
+    gripper_open_threshold = 0.04
 
     # 3. Build state (7D)
     states = np.zeros((T, 7), dtype=np.float32)
@@ -285,7 +286,7 @@ def compute_actions_from_ee_pose(ee_pose: np.ndarray) -> Tuple[np.ndarray, np.nd
         actions[t, :3] = ee_pose[t + 1, :3] - ee_pose[t, :3]
         delta_rot = euler_angles[t + 1] - euler_angles[t]
         actions[t, 3:6] = wrap_angle_delta(delta_rot)
-        actions[t, 6] = 1.0 if ee_pose[t + 1, gripper_idx] >= 0.07 else 0.0
+        actions[t, 6] = 1.0 if ee_pose[t + 1, gripper_idx] >= gripper_open_threshold else 0.0
 
     if T > 1:
         actions[-1] = actions[-2]
