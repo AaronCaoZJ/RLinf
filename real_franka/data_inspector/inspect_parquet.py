@@ -538,6 +538,36 @@ def validate_lerobot21(
     return lines
 
 
+def append_state_action_first_steps(
+    lines: List[str],
+    state_arr: np.ndarray,
+    action_arr: np.ndarray,
+    max_timesteps: int,
+    total_steps: int,
+) -> None:
+    """Append explicit first-N timestep values for state and actions."""
+    n_print = total_steps if max_timesteps <= 0 else min(max_timesteps, total_steps)
+    lines.append(f"── state/actions 逐步明细（前 {n_print} 步）────────────────────")
+
+    if state_arr.ndim == 2 and state_arr.shape[0] > 0:
+        lines.append("  state:")
+        for t in range(n_print):
+            row = np.round(state_arr[t].astype(np.float64), 6).tolist()
+            lines.append(f"    t={t}: {row}")
+    else:
+        lines.append("  [FAIL] state 不可打印（shape异常或为空）")
+
+    if action_arr.ndim == 2 and action_arr.shape[0] > 0:
+        lines.append("  actions:")
+        for t in range(n_print):
+            row = np.round(action_arr[t].astype(np.float64), 6).tolist()
+            lines.append(f"    t={t}: {row}")
+    else:
+        lines.append("  [FAIL] actions 不可打印（shape异常或为空）")
+
+    lines.append("")
+
+
 def validate_dataset_layout(dataset_path: Path, files: List[Path]) -> List[str]:
     """Validate LeRobot v2.1 directory organization and meta files."""
     lines: List[str] = []
@@ -746,6 +776,14 @@ def inspect_one_file(parquet_path: Path, max_timesteps: int = 3) -> List[str]:
         pf=pf,
     )
 
+    append_state_action_first_steps(
+        lines=lines,
+        state_arr=arrays.get("state", np.array([])),
+        action_arr=arrays.get("actions", np.array([])),
+        max_timesteps=max_timesteps,
+        total_steps=T,
+    )
+
     # ── 列结构 ───────────────────────────────────────────────────────────────
     lines.append("── 列结构（shape / size）──────────────────────────────────────")
     for field in schema:
@@ -858,7 +896,7 @@ def inspect_one_file(parquet_path: Path, max_timesteps: int = 3) -> List[str]:
     return lines
 
 
-def inspect_one_file_concise(parquet_path: Path) -> List[str]:
+def inspect_one_file_concise(parquet_path: Path, max_timesteps: int = 3) -> List[str]:
     """Concise report focused on key checks requested by users."""
     lines: List[str] = []
     lines.append("=" * 65)
@@ -925,6 +963,14 @@ def inspect_one_file_concise(parquet_path: Path) -> List[str]:
     else:
         lines.append("  [FAIL] actions shape 无法用于检查第7维夹爪")
     lines.append("")
+
+    append_state_action_first_steps(
+        lines=lines,
+        state_arr=state,
+        action_arr=actions,
+        max_timesteps=max_timesteps,
+        total_steps=T,
+    )
 
     lines.append("── 关键点4: image / wrist_image (HWC/C/dtype) ───────────────")
     for col in ("image", "wrist_image"):
@@ -1131,9 +1177,9 @@ def main() -> int:
             all_lines += inspect_one_file(file_b, max_timesteps=args.max_timesteps)
             all_lines += compare_index(file_a, file_b)
     else:
-        all_lines += inspect_one_file_concise(file_a)
+        all_lines += inspect_one_file_concise(file_a, max_timesteps=args.max_timesteps)
         if file_b:
-            all_lines += inspect_one_file_concise(file_b)
+            all_lines += inspect_one_file_concise(file_b, max_timesteps=args.max_timesteps)
             all_lines += compare_index_concise(file_a, file_b)
 
     if args.scan_all and path.is_dir():

@@ -25,6 +25,14 @@ Now switch the virtual environment to `openpi`:
 source switch_env openpi
 ```
 
+To kill a container:
+
+```bash
+exit
+docker stop zhijun_rlinf # 在删除前需停止运行
+docker rm zhijun_rlinf # 删除容器会丢失配置的软件和环境变量
+```
+
 👉 Notice：
 
 - The server log time is UTC (8 hours slower than Beijing time).
@@ -52,7 +60,7 @@ bash examples/embodiment/eval_embodiment.sh libero_goal_ppo_openpi LIBERO # og
 
 ## Real+Sim Co-SFT（BlockPAP-v1_Mix）
 
-❗️ 首先注册 `pi05_blockpap_mix`，复用 `franka_co_training_dataconfig.py`，并在 /workspace1/zhijun/RLinf/rlinf/models/embodiment/openpi/dataconfig/__init__.py 中增加申明：
+首先，注册 `pi05_blockpap_mix`，复用 `franka_co_training_dataconfig.py`，并在 `rlinf/models/embodiment/openpi/dataconfig/__init__.py` 中增加申明：
 
 ```python
 TrainConfig(
@@ -71,3 +79,20 @@ TrainConfig(
 bash compute_norm_stats.sh
 ```
 
+❗️ `fsdp_vla_sft_worker.py` 新增 `_DistributedWeightedSampler` 类和 `_build_weighted_openpi_loader` 方法，支持以 `cfg.co_training_ratio` 比例在前 num_real_episodes 个真机数据和 `1 - cfg.co_training_ratio` 比例在剩余数据中抽取。
+
+❗️ 真机 state[5] 与仿真存在恒定的 45 度偏差，state[2] 有 10cm 误差， `fsdp_vla_sft_worker.py` 新增 `_SimYawBiasDataset` 类，为 num_real_episodes 后的数据增加偏置，以真机数据对齐，仿真 eval 时需要对 state 做同样的处理。
+
+开启训练：
+
+```bash
+bash examples/sft/run_vla_sft.sh arc_mix_sft_openpi # mix
+bash examples/sft/run_vla_sft.sh arc_mix_sft_resume_openpi # resume
+
+```
+
+仿真检验：
+
+```bash
+bash toolkits/eval_scripts_openpi/blockpap_eval.sh
+```

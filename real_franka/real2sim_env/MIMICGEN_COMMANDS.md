@@ -133,12 +133,20 @@ python real_franka/merge_datasets.py
 - 目前 Mix 数据集中 real 和 mimicgen 的 `episodes_stats` 字段顺序不同，但读取逻辑按字段名匹配，不依赖固定顺序，通常无影响
 - 包含 episodes_stats（汇总所有 demo 的特征统计）
 - parquet 文件中的 `index` 为全局连续递增，而非按每个 episode 从 0 重新计数。
+- image 确定是 PIL 格式而不是 dist，避免训练报错
 - 确保使用 `datasets==3.6.0`，`lerobot==0.1.0`，actions、state 字段的数据格式为 `Sequence`，而不是 `List`，若某些 parquet 的 HF metadata 仍是 `List` 而非 `Sequence`，执行：
 
   ```bash
   python real_franka/fix_parquet_metadata.py \
     /workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/BlockPAP-v1_Mix
   ```
+
+❗️ Gripper 数据的三个层级：
+1. 真实 HDF5 原始数据（EE_pose）的最后一维，表示两指间的总宽度 [0, 0.08]
+2. 仿真环境中，per-finger = 0.04 = 完全张开，per-finger = 0.0 = 完全闭合，per-finger 约为 0.02 时则表示夹到了物体，被挡在了两指间总宽度 0.04 的位置
+3. 数据转换时，针对 real data，以 0.04 为阈值，区分夹住和没夹住，分别二值化为 0 和 1；针对 MimicGen 生成的数据，同样以 0.04 为阈值，gripper = jpos[:, 7] + jpos[:, 8]，基于下一帧的 gripper >= 0.04 判定这一帧的 action 0 或 1
+
+训练数据中，所有 gripper action 都是二值化 0 和 1，这与 state 的实际连续值不同，也与 ee_delta_pos 不同，在推理和验证时，传入 0，物理仿真就会时夹爪提供让宽度趋向 0 的力，进而抓住物体。
 
 期望的数据集格式：
 
