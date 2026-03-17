@@ -5,7 +5,6 @@
 ### Task: "pick up the block and place it on the coaster"
 
 当前成功判定：
-
 - XY 对准：block 中心到 coaster 中心的平面距离 < COASTER_RADIUS = 0.043m
 - Z 高度：block 中心 Z 落在目标 Z（TABLE_Z + COASTER_THICKNESS + BLOCK_HALF_SIZE[2]）± 0.02m
 - 姿态约束：四元数计算得到倾角 block 倾角 ≤ 20°
@@ -13,7 +12,6 @@
 - 释放约束：夹爪已打开（左指关节 + 右指关节 = qpos[7] + qpos[8] > 0.03 m）
 
 相机与轨迹（5 条不同初始化物块位置的真机轨迹）关键参数：
-
 - `CAM_T`: `og` / `0302` / `0303`
 - `TRAJ_ID`: `0` / `15` / `25` / `40` / `45` / `random`
 
@@ -33,7 +31,6 @@ python real_franka/real2sim_env/multiview_render.py \
 ### Replay hdf5
 
 `replay_traj.py` 中的 `hybrid_step()` 分层仿真：
-
 - 前 7 个关节（手臂）使用高刚度 PD 驱动（K=1e5）严格跟踪轨迹，避免跟踪过程的误差积累
 - 后 2 个关节（夹爪）使用物理仿真 PD 驱动，目标为 `joint_pos[:,7:9]/2`（干净的观测信号，0~0.04）
 
@@ -58,7 +55,6 @@ python /workspace1/zhijun/RLinf/real_franka/real2sim_env/overlay_videos.py
 ### Prepare src data -> blockpap_cleaned_src.hdf5
 
 其中 `clean_demo()` 参考 `data_convert.py` 中的 `detect_static_segments_advanced()` 对真实轨迹执行静止段检测与清洗：
-
 - 用 obs_ee_pose（8D）的位置/旋转/夹爪变化量逐帧计算运动分数
 - 检测到连续 ≥ min_static_frames（默认5帧）且运动分数低的片段，从 mask 中排除
 - 将 mask 同步应用到所有字段：actions、states、eef_pose、block_pose、grasped 等
@@ -71,7 +67,7 @@ python /workspace1/zhijun/RLinf/real_franka/real2sim_env/overlay_videos.py
 python real_franka/real2sim_env/mg_prepare_src_data.py
 ```
 
-```js
+```json
 blockpap_cleaned_src.hdf5
 ├─ [data/]
 │  ├─ [demo_0/]
@@ -101,7 +97,6 @@ blockpap_cleaned_src.hdf5
 ### Generate MimicGen dataset -> LeRobot-v2.1 format
 
 具体 pipeline（`mg_generate_blockpap_data.py`）：
-
 1. 定义 2 个子任务 `grasp` 和 `place`，分别以 block 和 target_coaster 作为参考物
 2. 生成循环，每次重置环境，随机初始化物块位置，根据 block 找到最近 src traj
 3. 通过参考物变换源轨迹，任务执行期间使用 `subtask_term_signals/grasped` 作为子任务切换标志，`hybrid_step()` 步进仿真
@@ -115,7 +110,6 @@ bash real_franka/real2sim_env/mg_multi_gpu_run.sh
 ### Real data convert and dataset merge 
 
 ❗️ 注意 hdf5 中的图像和视频文件的命名对应：
-
 - camera_left_color  (正前方全景, 对应 1.mp4) -> image
 - camera_wrist_color (腕部俯视,  对应 0.mp4) -> wrist_image
 - camera_front_color (实为是侧后相机，对应 2.mp4), 不使用
@@ -141,7 +135,7 @@ python real_franka/merge_datasets.py
     /workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/BlockPAP-v1_Mix
   ```
 
-❗️ Gripper 数据的三个层级：
+💡 Gripper 数据的三个层级：
 1. 真实 HDF5 原始数据（EE_pose）的最后一维，表示两指间的总宽度 [0, 0.08]
 2. 仿真环境中，per-finger = 0.04 = 完全张开，per-finger = 0.0 = 完全闭合，per-finger 约为 0.02 时则表示夹到了物体，被挡在了两指间总宽度 0.04 的位置
 3. 数据转换时，针对 real data，以 0.04 为阈值，区分夹住和没夹住，分别二值化为 0 和 1；针对 MimicGen 生成的数据，同样以 0.04 为阈值，gripper = jpos[:, 7] + jpos[:, 8]，基于下一帧的 gripper >= 0.04 判定这一帧的 action 0 或 1
@@ -150,7 +144,7 @@ python real_franka/merge_datasets.py
 
 期望的数据集格式：
 
-```js
+```json
 BlockPAP-v1_Mix
 ├── data/
 │   ├── chunk-000/
@@ -194,7 +188,7 @@ class MG_NewTask(PandaKinematicsMixin, MG_EnvInterface):
 
 `mg_blockpap_wrapper.py`：MimicGen 期望 env 是 robomimic 的 `EnvBase`，该 wrapper 负责把 ManiSkill（gymnasium 风格）接口翻译成 robomimic 风格。
 
-```js
+```json
 入口（谁在驱动）
 MimicGen DataGenerator
 

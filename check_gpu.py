@@ -1,4 +1,10 @@
+import argparse
 import torch
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--gpus", type=int, nargs="+", default=[0,1,3,4,5],
+                    help="GPU indices to test, e.g. --gpus 0 1 3. Defaults to all.")
+args = parser.parse_args()
 
 print(f"PyTorch version: {torch.__version__}")
 print(f"CUDA version:    {torch.version.cuda}")
@@ -12,7 +18,9 @@ except Exception as e:
 
 print()
 
-for gpu_id in range(count):
+gpu_ids = args.gpus if args.gpus is not None else list(range(count))
+
+for gpu_id in gpu_ids:
     print(f"=== GPU {gpu_id} ===")
 
     try:
