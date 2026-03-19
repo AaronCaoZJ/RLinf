@@ -7,7 +7,7 @@
 Create a container for the first time:
 
 ```bash
-docker pull rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+docker pull rlinf/rlinf:agentic-rlinf0.2-maniskill_libero
 bash /workspace1/zhijun/RLinf/docker-run-zhijun_rlinf.sh
 ```
 
@@ -83,12 +83,19 @@ bash compute_norm_stats.sh
 
 ❗️ 真机 state[5] 与仿真存在恒定的 45 度偏差，state[2] 有 10cm 误差， `fsdp_vla_sft_worker.py` 新增 `_SimYawBiasDataset` 类，为 num_real_episodes 后的数据增加偏置，以真机数据对齐，仿真 eval 时需要对 state 做同样的处理。
 
+```yaml
+# 当前开启这两个参数时，对 simulation data 硬编码了偏置处理
+data.num_real_episodes: 50
+data.co_training_ratio: 0.5 
+# 可以选择开启隔帧构造数据，增大每一个 action 的大小，应当更好学
+model.openpi.action_subsample_stride: 2
+```
+
 开启训练：
 
 ```bash
 bash examples/sft/run_vla_sft.sh arc_mix_sft_openpi # mix
 bash examples/sft/run_vla_sft.sh arc_mix_sft_resume_openpi # resume
-
 ```
 
 仿真检验：

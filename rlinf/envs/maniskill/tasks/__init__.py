@@ -11,3 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Register custom real-robot environments
+import real_franka.real2sim_env.pick_and_place  # noqa: F401  registers BlockPAP-v1

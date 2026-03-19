@@ -307,6 +307,32 @@ _CONFIGS = [
         ),
         pytorch_weight_path="checkpoints/torch/pi0_base",
     ),
+    TrainConfig(
+        name="pi05_blockpap_mix",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=8, discrete_state_input=False
+        ),  # discrete_state_input=False: stateless policy, True: with state policy
+        data=LeRobotFrankaEEDataConfig(
+            repo_id="BlockPAP-v1_Mix",
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_blockpap_mix/assets"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=16,
+        # seed=0,
+        # optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # ema_decay=0.999,
+        # num_workers=8,
+        # num_train_steps=5_000,
+        # log_interval=5,
+        # save_interval=250,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
@@ -340,7 +366,10 @@ def _override_with_model_path(config: TrainConfig, model_path: str) -> TrainConf
 
 
 def get_openpi_config(
-    config_name: str, model_path: Optional[str] = None, batch_size: Optional[int] = None
+    config_name: str,
+    model_path: Optional[str] = None,
+    batch_size: Optional[int] = None,
+    action_subsample_stride: Optional[int] = None,
 ) -> TrainConfig:
     """Get a config by name."""
     if config_name not in _CONFIGS_DICT:
@@ -355,5 +384,12 @@ def get_openpi_config(
         config = _override_with_model_path(config, model_path)
     if batch_size is not None:
         config = dataclasses.replace(config, batch_size=batch_size)
+    if action_subsample_stride is not None and action_subsample_stride > 1:
+        data_config = config.data
+        if hasattr(data_config, "action_subsample_stride"):
+            data_config = dataclasses.replace(
+                data_config, action_subsample_stride=action_subsample_stride
+            )
+            config = dataclasses.replace(config, data=data_config)
 
     return config

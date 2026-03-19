@@ -25,6 +25,51 @@ from rlinf.models.embodiment.openpi.policies import franka_policy
 
 
 @dataclasses.dataclass(frozen=True)
+class _StrideAggregateDeltaWithBinaryGripper:
+    """Downsample action chunks while preserving delta and binary gripper semantics.
+
+    Expected Franka action layout is [dx, dy, dz, drx, dry, drz, gripper].
+    For each stride-sized window:
+      - first 6 delta dims are summed (equivalent coarse-step delta)
+      - gripper keeps the window's last command and is re-binarized to {0, 1}
+    """
+
+    stride: int
+    delta_dims: int = 6
+    gripper_dim: int = 6
+    gripper_threshold: float = 0.5
+
+    def __call__(self, data: dict) -> dict:
+        if "actions" not in data or self.stride <= 1:
+            return data
+
+        actions = np.asarray(data["actions"])
+        if actions.ndim != 2:
+            raise ValueError(f"Expected actions shape (T, D), got {actions.shape}")
+
+        usable_steps = (actions.shape[0] // self.stride) * self.stride
+        if usable_steps <= 0:
+            raise ValueError(
+                f"Action horizon ({actions.shape[0]}) must be >= stride ({self.stride})."
+            )
+
+        # Worker inflates horizon to horizon*stride; this slice is a safe fallback.
+        actions = actions[:usable_steps]
+        windows = actions.reshape(-1, self.stride, actions.shape[1])
+
+        coarse_actions = windows[:, -1, :].copy()
+        coarse_actions[:, : self.delta_dims] = windows[:, :, : self.delta_dims].sum(axis=1)
+
+        if self.gripper_dim < coarse_actions.shape[1]:
+            coarse_actions[:, self.gripper_dim] = (
+                windows[:, -1, self.gripper_dim] >= self.gripper_threshold
+            ).astype(actions.dtype)
+
+        data["actions"] = coarse_actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotFrankaEEDataConfig(DataConfigFactory):
     """
     This config is used to configure transforms that are applied at various parts of the data pipeline.
@@ -38,6 +83,12 @@ class LeRobotFrankaEEDataConfig(DataConfigFactory):
     extra_delta_transform: bool = True  # False for additional process(abs_action - state) to get delta action for training
     # train actions using rotation_6d
     action_train_with_rotation_6d: bool = False
+    # Temporal subsampling stride for action sequences.
+    # stride=1 keeps all frames (original fps).
+    # stride=N aggregates every N frames into one coarse action:
+    #   - delta dims are summed
+    #   - binary gripper takes the last command in the window
+    action_subsample_stride: int = 1
 
     def generate_observations(
         image: np.ndarray, state: np.ndarray, prompt: str
@@ -66,14 +117,28 @@ class LeRobotFrankaEEDataConfig(DataConfigFactory):
             ]
         )
 
-        data_transforms = _transforms.Group(
-            inputs=[
-                franka_policy.FrankaEEInputs(
-                    action_dim=model_config.action_dim,
-                    model_type=model_config.model_type,
-                    action_train_with_rotation_6d=self.action_train_with_rotation_6d,
+        input_transforms = []
+        if self.action_subsample_stride > 1:
+            if self.extra_delta_transform:
+                input_transforms.append(
+                    _StrideAggregateDeltaWithBinaryGripper(
+                        stride=self.action_subsample_stride
+                    )
                 )
-            ],
+            else:
+                input_transforms.append(
+                    _transforms.SubsampleActions(stride=self.action_subsample_stride)
+                )
+        input_transforms.append(
+            franka_policy.FrankaEEInputs(
+                action_dim=model_config.action_dim,
+                model_type=model_config.model_type,
+                action_train_with_rotation_6d=self.action_train_with_rotation_6d,
+            )
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=input_transforms,
             outputs=[
                 franka_policy.FrankaEEOutputs(
                     action_train_with_rotation_6d=self.action_train_with_rotation_6d

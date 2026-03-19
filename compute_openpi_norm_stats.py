@@ -96,6 +96,25 @@ def parse_args() -> argparse.Namespace:
             "Recommended for local datasets like BlockPAP."
         ),
     )
+    parser.add_argument(
+        "--add-bias",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply sim bias correction to sim data rows: "
+            "state[2] += 0.10 m (z +10 cm), state[5] -= pi/4 rad (rz -45 deg). "
+            "Requires --num-real to identify where sim data begins."
+        ),
+    )
+    parser.add_argument(
+        "--num-real",
+        type=int,
+        default=None,
+        help=(
+            "Number of rows that are real robot data (rows 0..num_real-1). "
+            "Rows from num_real onward are treated as sim data for bias correction."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -116,8 +135,37 @@ def _resolve_repo_root(repo_id: str) -> Path:
     )
 
 
+def _apply_sim_bias(state_arr: np.ndarray, chunk_start: int, num_real: int | None) -> np.ndarray:
+    """Apply sim bias correction to rows that belong to sim data.
+
+    For sim rows: state[2] += 0.10 (m), state[5] -= pi/4 (45 degrees in radians).
+    Real rows are the first `num_real` rows; everything after is sim.
+    """
+    if num_real is None:
+        return state_arr  # no-op if num_real not specified
+
+    chunk_end = chunk_start + len(state_arr)
+    if chunk_end <= num_real:
+        return state_arr  # all real, no change
+
+    state_arr = state_arr.copy()
+    sim_offset = max(0, num_real - chunk_start)  # index within chunk where sim begins
+
+    if state_arr.shape[1] > 2:
+        state_arr[sim_offset:, 2] += 0.10  # z += 10 cm
+    if state_arr.shape[1] > 5:
+        state_arr[sim_offset:, 5] -= np.pi / 4  # rz -= 45 degrees (in radians)
+
+    return state_arr
+
+
 def _compute_from_parquet_only(
-    repo_root: Path, action_dim: int, max_batches: int | None, batch_size: int
+    repo_root: Path,
+    action_dim: int,
+    max_batches: int | None,
+    batch_size: int,
+    add_bias: bool = False,
+    num_real: int | None = None,
 ) -> dict[str, normalize.RunningStats]:
     try:
         import pyarrow.parquet as pq
@@ -133,6 +181,9 @@ def _compute_from_parquet_only(
     max_rows = None
     if max_batches is not None:
         max_rows = max(1, max_batches) * batch_size
+
+    if add_bias and num_real is None:
+        raise ValueError("--add-bias requires --num-real to indicate where sim data starts.")
 
     stats = {
         "state": normalize.RunningStats(),
@@ -173,6 +224,9 @@ def _compute_from_parquet_only(
                 break
             state_arr = state_arr[:keep]
             action_arr = action_arr[:keep]
+
+        if add_bias:
+            state_arr = _apply_sim_bias(state_arr, consumed_rows, num_real)
 
         stats["state"].update(state_arr)
         stats["actions"].update(action_arr)
@@ -237,11 +291,19 @@ def main() -> None:
     if args.fast_parquet_only:
         repo_root = _resolve_repo_root(data_cfg.repo_id)
         print(f"Using fast parquet path from: {repo_root}", flush=True)
+        if args.add_bias:
+            print(
+                f"Sim bias enabled: num_real={args.num_real}, "
+                "state[2]+=0.10m, state[5]-=pi/4 for sim rows",
+                flush=True,
+            )
         stats = _compute_from_parquet_only(
             repo_root=repo_root,
             action_dim=cfg.model.action_dim,
             max_batches=args.max_batches,
             batch_size=cfg.batch_size,
+            add_bias=args.add_bias,
+            num_real=args.num_real,
         )
     else:
         dataset = data_loader.create_torch_dataset(

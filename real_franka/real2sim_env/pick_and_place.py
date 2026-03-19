@@ -1,5 +1,5 @@
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import numpy as np
 import torch
@@ -31,6 +31,10 @@ class PandaHighFriction(Panda):
             panda_rightfinger=dict(material="gripper", patch_radius=0.1, min_patch_radius=0.1),
         ),
     )
+
+    @property
+    def ee_pose_at_robot_base(self):
+        return self.robot.pose.inv() * self.tcp.pose
 
 # front camera
 # 2026-02-15 19:16:38 - __main__ - INFO: 旋转矩阵是:
@@ -67,7 +71,7 @@ CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需
 TRAJ_ID = "0"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
 
-@register_env("BlockPAP-v1", max_episode_steps=600)
+@register_env("BlockPAP-v1", max_episode_steps=3000)
 class PickAndPlaceEnv(BaseEnv):
 
     SUPPORTED_ROBOTS = ["panda_high_friction", "panda", "panda_wristcam"]
@@ -147,7 +151,7 @@ class PickAndPlaceEnv(BaseEnv):
     # 长方体半尺寸：4cm × 4cm × 6cm 竖放
     BLOCK_HALF_SIZE = [0.02, 0.02, 0.03]
     # 长方体物理参数：更重 + 更大摩擦 + 无回弹，减少被弹飞/打滑
-    BLOCK_DENSITY = 100.0
+    BLOCK_DENSITY = 200.0
     BLOCK_STATIC_FRICTION = 0.5
     BLOCK_DYNAMIC_FRICTION = 0.5
     BLOCK_RESTITUTION = 0.0
@@ -358,18 +362,28 @@ class PickAndPlaceEnv(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
 
-            if TRAJ_ID in self._TRAJ_CONFIGS:
+            # ── 初始化模式选择 ──────────────────────────────────────────────
+            # 优先级：1) options["episode_id"] → 确定性选固定轨迹
+            #          2) TRAJ_ID 全局变量为已知轨迹 → Replay/prepare 脚本模式
+            #          3) 否则（RL 训练）→ 随机采样
+            episode_id = options.get("episode_id", None)
+            traj_keys = list(self._TRAJ_CONFIGS.keys())
+
+            if episode_id is not None:
+                # ── 确定性模式（来自 ManiskillEnv use_fixed_reset_state_ids）──
+                traj_idx = int(episode_id[0].item()) % len(traj_keys)
+                traj_cfg = self._TRAJ_CONFIGS[traj_keys[traj_idx]]
+                qpos_rad   = traj_cfg["qpos_ref_12"] if USE_REF_12 else traj_cfg["qpos_ref_0"]
+                block_x,   block_y   = traj_cfg["block_xy"]
+                coaster_x, coaster_y = traj_cfg["coaster_xy"]
+            elif TRAJ_ID in self._TRAJ_CONFIGS:
                 # ── Replay / prepare 模式：使用固定轨迹配置 ─────────────────
                 traj_cfg = self._TRAJ_CONFIGS[TRAJ_ID]
                 qpos_rad = traj_cfg["qpos_ref_12"] if USE_REF_12 else traj_cfg["qpos_ref_0"]
                 block_x,   block_y   = traj_cfg["block_xy"]
                 coaster_x, coaster_y = traj_cfg["coaster_xy"]
             else:
-                # ── MimicGen 生成模式（TRAJ_ID == "random"）──────────────────
-                # 从 5 条轨迹配置中随机选一个作为初始 qpos 基础，
-                # 物块和杯垫位置在指定区域内均匀采样。
-                import random as _random
-
+                # ── RL 训练 / MimicGen 生成模式（TRAJ_ID == "random"）────────
                 # 物块：X ∈ [TABLE_CENTER_X - 0.10, TABLE_CENTER_X + 0.10]
                 #        Y ∈ [-0.15, -0.03]
                 block_x = self._TABLE_CENTER_X + np.random.uniform(-0.10, 0.10)
@@ -380,7 +394,7 @@ class PickAndPlaceEnv(BaseEnv):
                 coaster_x = self._TABLE_CENTER_X + np.random.uniform(-0.03, 0.01)
                 coaster_y = np.random.uniform(0.03, 0.05)
 
-                # 找到与采样位置最近的预定义轨迹配置
+                # 找到与采样位置最近的预定义轨迹配置，继承其初始 qpos
                 best_tid, best_dist = None, float("inf")
                 for tid, cfg in self._TRAJ_CONFIGS.items():
                     bx, by = cfg["block_xy"]
@@ -459,6 +473,82 @@ class PickAndPlaceEnv(BaseEnv):
 
     def compute_normalized_dense_reward(self, obs, action, info):
         return self.compute_dense_reward(obs, action, info) / 5.0
+
+    # ── RLinf 接口：供 ManiskillEnv (wrap_obs_mode=raw) 使用 ────────────────
+
+    def get_language_instruction(self):
+        return ["pick up the block and place it on the coaster"] * self.num_envs
+
+    def _build_extracted_obs(self, raw_obs: dict) -> dict:
+        """构建 extracted_obs，格式与官方 panda_put_on_in_scene 保持一致。
+
+        Returns:
+            dict with keys:
+                main_images: (num_envs, H, W, 3) uint8, external_cam RGB
+                states:      (num_envs, 7) float32, [ee_pos(3), ee_euler(3), gripper(1)]
+                task_descriptions: list[str]
+        """
+        obs_image = None
+        if isinstance(raw_obs, dict):
+            sensor_data = raw_obs.get("sensor_data", None)
+            if isinstance(sensor_data, dict):
+                cam_data = sensor_data.get("external_cam", None)
+                if isinstance(cam_data, dict) and "rgb" in cam_data:
+                    obs_image = cam_data["rgb"].to(torch.uint8)
+
+        if obs_image is None:
+            # In state obs_mode, raw_obs may not contain sensor_data.
+            # Fall back to offscreen render to keep MimicGen extracted_obs compatible.
+            frame = self.render()
+            if frame is None:
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            if isinstance(frame, torch.Tensor):
+                frame = frame.detach().cpu().numpy()
+            frame = np.asarray(frame)
+            if frame.ndim == 4:
+                frame = frame[0]
+            if frame.dtype != np.uint8:
+                if frame.max() <= 1.0:
+                    frame = (frame * 255.0).astype(np.uint8)
+                else:
+                    frame = np.clip(frame, 0, 255).astype(np.uint8)
+            obs_image = torch.from_numpy(frame).to(torch.uint8).unsqueeze(0)
+
+        # EE 位姿：机器人底座（世界原点）坐标系下的末端位姿
+        ee_pose_T = (
+            self.agent.ee_pose_at_robot_base.to_transformation_matrix()
+            .cpu()
+            .numpy()
+        )  # (num_envs, 4, 4)
+        pos = ee_pose_T[:, :3, 3]  # (num_envs, 3)
+
+        # 旋转矩阵 → ZYX 欧拉角（与 transforms3d mat2euler("sxyz") 等价）
+        euler = np.stack(
+            [Rotation.from_matrix(ee_pose_T[i, :3, :3]).as_euler("xyz") for i in range(self.num_envs)],
+            axis=0,
+        ).astype(np.float32)  # (num_envs, 3)
+
+        gripper_state = self.agent.robot.get_qpos().to(torch.float32)[:, -1:]  # (num_envs, 1)
+
+        pos_t    = torch.from_numpy(pos.astype(np.float32)).to(gripper_state.device)
+        euler_t  = torch.from_numpy(euler).to(gripper_state.device)
+        proprioception = torch.cat([pos_t, euler_t, gripper_state], dim=1)  # (num_envs, 7)
+
+        return {
+            "main_images": obs_image,
+            "states": proprioception,
+            "task_descriptions": self.get_language_instruction(),
+        }
+
+    def reset(self, seed=None, options=None):
+        raw_obs, infos = super().reset(seed=seed, options=options)
+        infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, infos
+
+    def step(self, action):
+        raw_obs, reward, terminations, truncations, infos = super().step(action)
+        infos["extracted_obs"] = self._build_extracted_obs(raw_obs)
+        return raw_obs, reward, terminations, truncations, infos
 
 
 if __name__ == "__main__":

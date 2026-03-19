@@ -10,4 +10,6 @@ python -u compute_openpi_norm_stats.py \
   --repo-id /workspace1/zhijun/mg_dataset/BlockPAP-v1_Mix \
   --asset-id BlockPAP-v1_Mix \
   --fast-parquet-only \
-  --hf-offline
+  --hf-offline \
+  --add-bias \
+  --num-real 50
