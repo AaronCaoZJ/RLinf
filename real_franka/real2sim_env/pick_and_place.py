@@ -1,6 +1,7 @@
 # import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+import os
 import numpy as np
 import torch
 import sapien
@@ -301,7 +302,13 @@ class PickAndPlaceEnv(BaseEnv):
         self._base_pedestal = pedestal_builder.build_kinematic(name="robot_base_pedestal")
 
         # 桌面中心在机器人前方 _TABLE_CENTER_X（木质纹理 + PBR）
-        _WOOD_TEX = "/workspace1/zhijun/RLinf/rlinf/envs/maniskill/assets/carrot/more_table/textures/006.png"
+        _WOOD_TEX = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "rlinf", "envs", "maniskill", "assets",
+                "carrot", "more_table", "textures", "006.png",
+            )
+        )
         table_builder = self.scene.create_actor_builder()
         table_phys_mat = PhysxMaterial(
             static_friction=self.TABLE_STATIC_FRICTION,
@@ -653,7 +660,12 @@ if __name__ == "__main__":
         def _step_frames(cam_name):
             return video_frames[cam_name]
 
-        _REF_BASE = "/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot"
+        _REF_BASE = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "data_inspector", "BlockPAP_ref_screenshot",
+            )
+        )
 
         # ── 正面相机 → render/traj... ────────────────────────────────────
         front_dir = f"{RENDER_BASE_DIR}/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
