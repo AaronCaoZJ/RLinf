@@ -36,7 +36,7 @@ docker rm zhijun_rlinf # 删除容器会丢失配置的软件和环境变量
 👉 Notice：
 
 - The server log time is UTC (8 hours slower than Beijing time).
-- If encounter permissions issue when modifing files in /workspace1, run `fix_perm_15` in the host terminal (for showlab15) to resolve.
+- If encounter permissions issue when modifing files in /workspace1, run alias command `fixperm` in the host terminal for showlab15 (`fixperm_0` for /users directory) to resolve.
 
 ## Examples in Embodied Scenarios
 
