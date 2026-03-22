@@ -75,6 +75,7 @@ ROT_LIMIT = 0.1
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _to_numpy(t):
     """Convert tensor (possibly batched) or array to 1-D numpy."""
     if hasattr(t, "cpu"):

@@ -12,6 +12,12 @@ from huggingface_hub import snapshot_download
 # repo_type="model"
 # allow_patterns="*"
 
+# download RLinf-Pi05-ManiSkill-25Main-SFT model
+save_dir = "../hf_download/models/RLinf-Pi05-ManiSkill-25Main-SFT"
+repo_id = "RLinf/RLinf-Pi05-ManiSkill-25Main-SFT"
+repo_type="model"
+allow_patterns="*"
+
 # download pi05_base model
 # save_dir = "../hf_download/models/pi05_base"
 # repo_id = "lerobot/pi05_base"
@@ -37,10 +43,10 @@ from huggingface_hub import snapshot_download
 # allow_patterns="*"
 
 # download RLCo-Example-Mix-Data
-save_dir = "../hf_download/datasets/RLCo-Example-Mix-Data"
-repo_id = "RLinf/RLCo-Example-Mix-Data"
-repo_type="dataset"
-allow_patterns="*"
+# save_dir = "../hf_download/datasets/RLCo-Example-Mix-Data"
+# repo_id = "RLinf/RLCo-Example-Mix-Data"
+# repo_type="dataset"
+# allow_patterns="*"
 
 
 snapshot_download(
