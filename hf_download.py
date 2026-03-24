@@ -13,10 +13,10 @@ from huggingface_hub import snapshot_download
 # allow_patterns="*"
 
 # download RLinf-Pi05-ManiSkill-25Main-SFT model
-save_dir = "../hf_download/models/RLinf-Pi05-ManiSkill-25Main-SFT"
-repo_id = "RLinf/RLinf-Pi05-ManiSkill-25Main-SFT"
-repo_type="model"
-allow_patterns="*"
+# save_dir = "../hf_download/models/RLinf-Pi05-ManiSkill-25Main-SFT"
+# repo_id = "RLinf/RLinf-Pi05-ManiSkill-25Main-SFT"
+# repo_type="model"
+# allow_patterns="*"
 
 # download pi05_base model
 # save_dir = "../hf_download/models/pi05_base"
@@ -48,6 +48,11 @@ allow_patterns="*"
 # repo_type="dataset"
 # allow_patterns="*"
 
+# download 0323 put block on block dataset
+save_dir = "../hf_download/datasets/0323_put_block_on_block"
+repo_id = "kowyo/pick-and-place"
+repo_type="dataset"
+allow_patterns="*"
 
 snapshot_download(
   local_dir=save_dir,

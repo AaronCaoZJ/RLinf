@@ -46,6 +46,11 @@ bash examples/sft/run_vla_sft.sh arc_libero_sft_openpi # edited
 bash examples/sft/run_vla_sft.sh libero_sft_openpi # og
 ```
 
+🌟 重要参数解析：
+- `action_horizon` 模型一次性预测的动作序列长度
+- `num_action_chunks` 是模型实际执行的动作长度
+- 
+
 ### Eval and RL（LIBERO）
 
 ```bash
@@ -110,7 +115,7 @@ bash toolkits/eval_scripts_openpi/blockpap_eval.sh
 
 每个 Global Step 包含四个阶段（假设使用 `num_gpu` 卡训练）：
 - 权重同步：Actor 将最新参数广播给所有 Rollout Worker，确保采样策略与训练策略一致。
-- Rollout 采样：`num_gpu` 个 env rank 平分 `total_num_envs` 个 env，按照 `max_steps_per_rollout_epoch` 执行 `rollout_epoch` 次，，以 `num_action_chunks` 将连续步切分为 chunk，得：
+- Rollout 采样：`num_gpu` 个 env rank 平分 `total_num_envs` 个 env，按照 `max_steps_per_rollout_epoch` 执行 `rollout_epoch` 次，，以 `num_action_chunks` 将连续步切分为 chunk：
   ```
   chunk_per_env = max_steps_per_rollout_epoch ÷ num_action_chunks × rollout_epoch
   total_num_chunk = chunk_per_env × total_num_envs
@@ -127,6 +132,7 @@ bash toolkits/eval_scripts_openpi/blockpap_eval.sh
   整个训练 × num_gpu
   ```
 - 每 `save_interval` 个 global step 保存一次 checkpoint。
+- 完整训练的总环境交互次数是 `total_num_envs` * `max_epochs` * `max_steps_per_rollout_epoch` * `rollout_epoch`
 
 开启训练：
 

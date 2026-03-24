@@ -225,7 +225,10 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         load_horizon = config.model.action_horizon * action_subsample_stride
         dataset = create_torch_dataset(data_config, load_horizon, config.model)
         # 在 RepackTransform 之前施加 sim yaw 偏置（此时样本仍有 state/episode_index 原始 key）
-        dataset = _SimYawBiasDataset(dataset, num_real_episodes, log_every=config.batch_size)
+        # Controlled by cfg.data.apply_sim_bias (default True for backward compat).
+        apply_sim_bias = getattr(self.cfg.data, "apply_sim_bias", True)
+        if apply_sim_bias:
+            dataset = _SimYawBiasDataset(dataset, num_real_episodes, log_every=config.batch_size)
         dataset = transform_dataset(dataset, data_config)
 
         # Unwrap transform chain to reach the underlying LeRobotDataset
