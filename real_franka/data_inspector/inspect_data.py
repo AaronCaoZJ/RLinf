@@ -12,7 +12,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-DATASET_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/storage/zhijun/real_franka/pick_and_place")
+DATASET_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/workspace1/zhijun/hf_download/datasets/0323_block_stack_optimal")
 VIDEO_DIR   = DATASET_DIR / "videos"
 LOG_FILE    = Path(__file__).parent / "data_log.txt"
 

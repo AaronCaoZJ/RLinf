@@ -22,9 +22,22 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 #   --type ${TYPE} \
 #   --path-in-repo global_step_5000
 
+# python hf_upload.py \
+#   --path ${CKPT_DIR}/global_step_15000 \
+#   --repo ${REPO} \
+#   --type ${TYPE} \
+#   --path-in-repo stride2_global_step_15000 \
+#   --num-workers ${NUM_WORKERS}
+
+# Upload BlockStack dataset
+# python hf_upload.py \
+#   --path /workspace1/zhijun/mg_dataset/blockstack_cleaned_real \
+#   --repo aaroncaozj/BlockStack-v1_Real \
+#   --type dataset \
+#   --num-workers ${NUM_WORKERS}
+
 python hf_upload.py \
-  --path ${CKPT_DIR}/global_step_15000 \
-  --repo ${REPO} \
-  --type ${TYPE} \
-  --path-in-repo stride2_global_step_15000 \
+  --path /workspace1/zhijun/mg_dataset/blockstack_sub-opt_cleaned_real \
+  --repo aaroncaozj/BlockStack-v1_sub-opt_Real \
+  --type dataset \
   --num-workers ${NUM_WORKERS}

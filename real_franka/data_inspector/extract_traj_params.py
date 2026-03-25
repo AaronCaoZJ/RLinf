@@ -14,8 +14,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-HDF5_DIR  = Path("/storage/zhijun/real_franka/pick_and_place")
-TRAJ_IDS  = [0, 15, 25, 40, 45]
+HDF5_DIR  = Path("/workspace1/zhijun/hf_download/datasets/0323_block_stack_optimal")
+TRAJ_IDS  = [12, 13, 14, 15, 16]
 T_REF     = 12.0          # 参考帧时刻（秒）
 OUTPUT    = Path(__file__).parent / "traj_params.txt"
 
