@@ -108,10 +108,12 @@ class LeRobotFrankaEEDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/image": "image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
+                        "observation/image":       "image",
+                        "observation/back_image":  "back_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state":       "state",
+                        "actions":                 "actions",
+                        "prompt":                  "prompt",
                     }
                 )
             ]

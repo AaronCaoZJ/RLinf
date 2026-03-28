@@ -85,7 +85,7 @@ bash compute_norm_stats.sh
 
 ❗️ `fsdp_vla_sft_worker.py` 新增 `_DistributedWeightedSampler` 类和 `_build_weighted_openpi_loader` 方法，支持以 `cfg.co_training_ratio` 比例在前 num_real_episodes 个真机数据和 `1 - cfg.co_training_ratio` 比例在剩余数据中抽取。
 
-❗️ 在 BlockPAP-v1 的环境配置脚本中增加了两个本体感知的偏置，避免 MimicGen 生成数据与真机分布不一致，避免训练时需对样本读取做特别处理，更简洁。eval 时单独写了 `get_ee_state()`，他和 `_build_extracted_obs` 读取了同样的数据，但是因为是独立的函数，仍要使用 state_bias 控制。~~真机 state[5] 与仿真存在恒定的 45 度偏差，state[2] 有 10cm 误差， `fsdp_vla_sft_worker.py` 新增 `_SimYawBiasDataset` 类，为 num_real_episodes 后的数据增加偏置，以真机数据对齐，仿真 eval 时需要对 state 做同样的处理。~~
+❗️ BlockPAP-v1 环境配置脚本和 wrapper 中的 `_obs_list_to_state_action` 增加了两个默认开启的本体感知的偏置，避免 MimicGen 生成数据与真机分布不一致，避免训练时需对样本读取做特别处理，更简洁。eval 时单独写了 `get_ee_state()`，他和 `_build_extracted_obs` 读取了同样的数据，但是因为是独立的函数，仍要使用 state_bias 控制。~~真机 state[5] 与仿真存在恒定的 45 度偏差，state[2] 有 10cm 误差， `fsdp_vla_sft_worker.py` 新增 `_SimYawBiasDataset` 类，为 num_real_episodes 后的数据增加偏置，以真机数据对齐，仿真 eval 时需要对 state 做同样的处理。~~
 
 
 ```yaml
@@ -101,6 +101,8 @@ model.openpi.action_subsample_stride: 2
 ```bash
 bash examples/sft/run_vla_sft.sh arc_mix_sft_openpi # mix
 bash examples/sft/run_vla_sft.sh arc_mix_sft_resume_openpi # resume
+
+bash examples/sft/run_vla_sft.sh arc_real_sft_openpi.yaml
 ```
 
 仿真检验：
@@ -141,3 +143,11 @@ cd ../pi-StepNFT
 bash examples/embodiment/run_embodiment.sh arc_maniskill_nft_actor_openpi_pi05 # edited maniskill baseline
 bash examples/embodiment/run_embodiment.sh arc_blockpap_nft_actor_openpi_pi05 # blockpap nft rl
 ```
+
+### 多相机输入
+
+| 来源 | 转换过程 | 最终 key |
+| :--- | :--- | :--- |
+| SFT dataset | 直接存储 | `observation/back_image` |
+| NFT rollout | `extra_view_images` → `obs_processor` | `observation/back_image` |
+| Eval 脚本 | `get_image(obs, "back_cam")` → 直接赋值 | `observation/back_image` |

@@ -1,0 +1,22 @@
+{
+  "output_root": "/workspace1/zhijun/mg_dataset/blockstack_sub-opt_cleaned_real_2",
+  "fps": 15,
+  "image_height": 480,
+  "image_width": 640,
+  "chunk_size": 500,
+  "temp_clean_dir": "/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/_temp_cleaned_blockstack",
+  "keep_temp_cleaned": false,
+  "cleaning": {
+    "gripper_threshold": 0.0005,
+    "pos_threshold": 0.0005,
+    "rot_threshold": 0.005,
+    "min_static_frames": 5,
+    "min_episode_length": 20
+  },
+  "datasets": [
+    {
+      "path": "/workspace1/zhijun/hf_download/datasets/0323_block_stack_sub-optimal",
+      "task": "stack the gray cube on the white cube"
+    }
+  ]
+}

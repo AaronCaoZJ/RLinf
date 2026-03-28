@@ -66,6 +66,7 @@ from rlinf.models.embodiment.openpi.dataconfig import _CONFIGS_DICT
 # ── Constants ────────────────────────────────────────────────────────────────
 
 CAM_NAME = "external_cam"
+EXTRA_CAM_NAME = "back_cam"   # back camera registered in BlockPAP-v1
 TASK_DESCRIPTION = "pick up the block and place it on the coaster"
 
 # pd_ee_delta_pose arm action bounds (metres / rad per step)
@@ -175,9 +176,9 @@ def get_ee_state(base_env):
     return state, gripper_width
 
 
-def get_image(obs):
-    """Extract external_cam RGB image as uint8 HWC numpy array."""
-    img = obs["sensor_data"][CAM_NAME]["rgb"]
+def get_image(obs, cam_name=CAM_NAME):
+    """Extract an RGB image from the given camera as uint8 HWC numpy array."""
+    img = obs["sensor_data"][cam_name]["rgb"]
     if hasattr(img, "cpu"):
         img = img.cpu().numpy()
     else:
@@ -216,6 +217,7 @@ def main(args):
 
     # ── Environment ─────────────────────────────────────────────────────────
     logger.info(f"Creating BlockPAP-v1  cam_t={args.cam_t!r}  "
+                f"extra_cam={args.extra_cam!r}  "
                 f"control_mode=pd_ee_delta_pose")
     env = gym.make(
         "BlockPAP-v1",
@@ -237,8 +239,9 @@ def main(args):
         obs, _ = env.reset()
         action_plan = collections.deque()
 
-        # Collect frames for video
+        # Collect frames for video (front camera; extra_cam collected in parallel)
         frames = [get_image(obs)]
+        extra_frames = [get_image(obs, args.extra_cam)] if args.extra_cam else []
 
         # Initialise gripper state tracker
         _, gripper_width = get_ee_state(base_env)
@@ -247,6 +250,9 @@ def main(args):
         for t in range(args.max_steps):
             img = get_image(obs)
             frames.append(img)
+            extra_img = get_image(obs, args.extra_cam) if args.extra_cam else None
+            if extra_img is not None:
+                extra_frames.append(extra_img)
 
             state, gripper_width = get_ee_state(base_env)
 
@@ -266,6 +272,8 @@ def main(args):
                     "observation/state": state_for_model,
                     "prompt": TASK_DESCRIPTION,
                 }
+                if extra_img is not None:
+                    observation["observation/back_image"] = extra_img
                 action_chunk = policy.infer(observation)["actions"]
                 # action_chunk: (horizon, 7) numpy
                 assert action_chunk.ndim == 2 and action_chunk.shape[1] == 7, (
@@ -333,6 +341,8 @@ def main(args):
                 logger.info(f"  SUCCESS at step {t + 1}")
                 # Capture one last frame after success
                 frames.append(get_image(obs))
+                if args.extra_cam:
+                    extra_frames.append(get_image(obs, args.extra_cam))
                 break
 
             if bool(terminated) or bool(truncated):
@@ -356,6 +366,14 @@ def main(args):
             )
             out_path.parent.mkdir(parents=True, exist_ok=True)
             subsampled = frames[:: args.video_temp_subsample]
+            if args.extra_cam and extra_frames:
+                extra_sub = extra_frames[:: args.video_temp_subsample]
+                # Pad to same length in case of off-by-one
+                n = min(len(subsampled), len(extra_sub))
+                subsampled = [
+                    np.concatenate([subsampled[i], extra_sub[i]], axis=1)
+                    for i in range(n)
+                ]
             imageio.mimwrite(str(out_path), subsampled,
                              fps=max(1, 20 // args.video_temp_subsample))
             logger.info(f"  Video  : {out_path}  ({len(subsampled)} frames)")
@@ -396,6 +414,11 @@ if __name__ == "__main__":
     parser.add_argument("--cam_t", type=str, default="og",
                         choices=["og", "0302", "0303"],
                         help="Camera translation preset (must match training data)")
+    parser.add_argument("--extra_cam", type=str, default=None,
+                        choices=[None, "back_cam"],
+                        help="Optional second camera to feed as observation/back_image. "
+                             "'back_cam' uses the back RealSense registered in BlockPAP-v1. "
+                             "Only enable when the policy was trained with this camera.")
     parser.add_argument("--num_episodes", type=int, default=20,
                         help="Total number of evaluation episodes")
     parser.add_argument("--max_steps", type=int, default=3000,

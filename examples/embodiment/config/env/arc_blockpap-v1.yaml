@@ -1,0 +1,39 @@
+env_type: maniskill
+
+total_num_envs: null
+
+auto_reset: False
+ignore_terminations: True
+use_rel_reward: False
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 80
+max_episode_steps: 80
+reward_mode: raw
+wrap_obs_mode: raw
+
+enable_offload: False
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: BlockPAP-v1
+  num_envs: null
+  obs_mode: "rgb"
+  # pd_ee_delta_pose: 7-DoF (delta_pos 3D + delta_euler 3D + gripper 1D)
+  # 与 pi0 panda_wristcam policy 的 action 格式一致
+  control_mode: pd_ee_delta_pose
+  sim_backend: "gpu"
+  sim_config:
+    sim_freq: 500
+    control_freq: 5
+  max_episode_steps: ${env.train.max_episode_steps}
+  sensor_configs:
+    shader_pack: "default"
+  render_mode: rgb_array
+  reward_mode: normalized_dense
+  use_sparse_reward: false

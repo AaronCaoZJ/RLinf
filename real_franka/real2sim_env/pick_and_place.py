@@ -72,6 +72,42 @@ CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需
 TRAJ_ID = "0"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
 
+
+def build_blockpap_states_from_env(base_env, apply_bias: bool = True):
+    """Build 7D BlockPAP proprio state from env internals.
+
+    Returns:
+        states: (N, 7) float32 [x, y, z, euler_x, euler_y, euler_z, gripper_total_width]
+        gripper_total_width: (N,) float32 in meters [0, 0.08]
+    """
+    ee_pose_T = base_env.agent.ee_pose_at_robot_base.to_transformation_matrix()
+    if torch.is_tensor(ee_pose_T):
+        ee_pose_T = ee_pose_T.detach().cpu().numpy()
+    ee_pose_T = np.asarray(ee_pose_T)
+    if ee_pose_T.ndim == 2:
+        ee_pose_T = ee_pose_T[None, ...]
+
+    pos = ee_pose_T[:, :3, 3].astype(np.float32)
+    euler = Rotation.from_matrix(ee_pose_T[:, :3, :3]).as_euler("xyz").astype(np.float32)
+
+    qpos = base_env.agent.robot.get_qpos()
+    if torch.is_tensor(qpos):
+        qpos = qpos.detach().cpu().numpy()
+    qpos = np.asarray(qpos, dtype=np.float32)
+    if qpos.ndim == 1:
+        qpos = qpos[None, ...]
+
+    gripper_total_width = (qpos[:, 7] + qpos[:, 8]).astype(np.float32)
+    states = np.concatenate([pos, euler, gripper_total_width[:, None]], axis=1)
+
+    if apply_bias:
+        # Match SFT training convention for simulation data.
+        states = states.copy()
+        states[:, 2] += 0.1
+        states[:, 5] += -np.pi / 4
+
+    return states, gripper_total_width
+
 @register_env("BlockPAP-v1", max_episode_steps=3000)
 class PickAndPlaceEnv(BaseEnv):
 
@@ -122,11 +158,11 @@ class PickAndPlaceEnv(BaseEnv):
         [  0.0,  607.719, 270.486],
         [  0.0,    0.0,     1.0  ],
     ])
-    # _K = np.array([
-    #     [607.875,   0.0,   333.961],
-    #     [  0.0,  607.719, 246.486],
-    #     [  0.0,    0.0,     1.0  ],
-    # ])
+    _K2 = np.array([
+        [607.875,   0.0,   359.961],
+        [  0.0,  607.719, 242.486],
+        [  0.0,    0.0,     1.0  ],
+    ])
 
     # ── 场景参数 ────────────────────────────────────────────────────────────
     # 桌面顶部世界 z = 30 mm（桌底 -5 mm，桌厚 35 mm）
@@ -234,8 +270,8 @@ class PickAndPlaceEnv(BaseEnv):
         return [
             CameraConfig("external_cam", pose_front, 640, 480,
                          near=0.01, far=10, intrinsic=self._K),
-            CameraConfig("side_cam",     pose_side,  640, 480,
-                         near=0.01, far=10, intrinsic=self._K),
+            CameraConfig("back_cam",     pose_side,  640, 480,
+                         near=0.01, far=10, intrinsic=self._K2),
         ]
 
     @property
@@ -358,7 +394,7 @@ class PickAndPlaceEnv(BaseEnv):
             half_length=self.COASTER_THICKNESS,
             color=[0.0, 0.8, 0.2, 1.0],
             name="target_coaster",
-            body_type="static",
+            body_type="kinematic",
             initial_pose=sapien.Pose(
                 p=[self._TABLE_CENTER_X, 0.0, self.TABLE_Z + self.COASTER_THICKNESS],
                 q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]  # 绕 Y 轴旋转 90 度
@@ -391,29 +427,81 @@ class PickAndPlaceEnv(BaseEnv):
                 coaster_x, coaster_y = traj_cfg["coaster_xy"]
             else:
                 # ── RL 训练 / MimicGen 生成模式（TRAJ_ID == "random"）────────
+                # 每个 env 独立采样，保证同 GPU 内不同 env、不同 GPU、不同 epoch 场景各异
                 # 物块：X ∈ [TABLE_CENTER_X - 0.10, TABLE_CENTER_X + 0.10]
                 #        Y ∈ [-0.15, -0.03]
-                block_x = self._TABLE_CENTER_X + np.random.uniform(-0.10, 0.10)
-                block_y = np.random.uniform(-0.15, -0.03)
-
+                block_x = torch.tensor(
+                    self._TABLE_CENTER_X + np.random.uniform(-0.10, 0.10, size=b),
+                    device=self.device, dtype=torch.float32,
+                )
+                block_y = torch.tensor(
+                    np.random.uniform(-0.15, -0.03, size=b),
+                    device=self.device, dtype=torch.float32,
+                )
                 # 杯垫：X ∈ [TABLE_CENTER_X - 0.03, TABLE_CENTER_X + 0.01]
-                #        Y ∈ [0.02, 0.06]
-                coaster_x = self._TABLE_CENTER_X + np.random.uniform(-0.03, 0.01)
-                coaster_y = np.random.uniform(0.03, 0.05)
+                #        Y ∈ [0.03, 0.05]
+                coaster_x = torch.tensor(
+                    self._TABLE_CENTER_X + np.random.uniform(-0.03, 0.01, size=b),
+                    device=self.device, dtype=torch.float32,
+                )
+                coaster_y = torch.tensor(
+                    np.random.uniform(0.03, 0.05, size=b),
+                    device=self.device, dtype=torch.float32,
+                )
 
-                # 找到与采样位置最近的预定义轨迹配置，继承其初始 qpos
-                best_tid, best_dist = None, float("inf")
-                for tid, cfg in self._TRAJ_CONFIGS.items():
-                    bx, by = cfg["block_xy"]
-                    cx, cy = cfg["coaster_xy"]
-                    d = ((block_x - bx) ** 2 + (block_y - by) ** 2
-                         + (coaster_x - cx) ** 2 + (coaster_y - cy) ** 2)
-                    if d < best_dist:
-                        best_dist, best_tid = d, tid
-                ref_cfg = self._TRAJ_CONFIGS[best_tid]
-                qpos_rad = ref_cfg["qpos_ref_0"]
-                # 保存最近配置 ID，供 DataGenerator 选择对应源轨迹
-                self._nearest_traj_id = best_tid
+                # 向量化最近轨迹查找：为每个 env 独立找最近 qpos
+                traj_vals = list(self._TRAJ_CONFIGS.values())
+                traj_keys = list(self._TRAJ_CONFIGS.keys())
+                traj_bxy = torch.tensor(
+                    [c["block_xy"] for c in traj_vals],
+                    device=self.device, dtype=torch.float32,
+                )  # (T, 2)
+                traj_cxy = torch.tensor(
+                    [c["coaster_xy"] for c in traj_vals],
+                    device=self.device, dtype=torch.float32,
+                )  # (T, 2)
+                env_bxy = torch.stack([block_x, block_y], dim=1)    # (b, 2)
+                env_cxy = torch.stack([coaster_x, coaster_y], dim=1)  # (b, 2)
+                dists = (
+                    ((env_bxy[:, None] - traj_bxy[None]) ** 2).sum(-1)
+                    + ((env_cxy[:, None] - traj_cxy[None]) ** 2).sum(-1)
+                )  # (b, T)
+                best_idx = dists.argmin(dim=1)  # (b,)
+
+                all_qpos = torch.tensor(
+                    [c["qpos_ref_0"] for c in traj_vals],
+                    device=self.device, dtype=torch.float32,
+                )  # (T, 7)
+                qpos_per_env = all_qpos[best_idx]  # (b, 7)
+                self._nearest_traj_id = traj_keys[best_idx[0].item()]
+
+                init_qpos = torch.cat(
+                    [qpos_per_env, torch.full((b, 2), 0.04, device=self.device)], dim=1
+                )  # (b, 9)
+                self.agent.robot.set_qpos(init_qpos)
+                self.agent.robot.set_qvel(torch.zeros((b, 9), device=self.device))
+
+                self._table.set_pose(
+                    sapien.Pose(p=[self._TABLE_CENTER_X, 0,
+                                   self.TABLE_Z - self._TABLE_HALF[2]])
+                )
+
+                cube_xyz = torch.zeros((b, 3), device=self.device)
+                cube_xyz[:, 0] = block_x
+                cube_xyz[:, 1] = block_y
+                cube_xyz[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
+                self.cube.set_pose(Pose.create_from_pq(p=cube_xyz))
+
+                coaster_xyz = torch.zeros((b, 3), device=self.device)
+                coaster_xyz[:, 0] = coaster_x
+                coaster_xyz[:, 1] = coaster_y
+                coaster_xyz[:, 2] = self.TABLE_Z + self.COASTER_THICKNESS
+                coaster_q = torch.tensor(
+                    [np.cos(np.pi / 4), 0, np.sin(np.pi / 4), 0],
+                    device=self.device, dtype=torch.float32,
+                ).expand(b, -1)
+                self.target.set_pose(Pose.create_from_pq(p=coaster_xyz, q=coaster_q))
+                return
 
             init_qpos = torch.tensor(qpos_rad + [0.04, 0.04], device=self.device)
             self.agent.robot.set_qpos(init_qpos.repeat(b, 1))
@@ -437,6 +525,17 @@ class PickAndPlaceEnv(BaseEnv):
                     q=[np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]
                 )
             )
+
+    def _is_cube_grasped(self) -> torch.Tensor:
+        """检测 cube 是否被夹爪抓住：cube 离桌面静止位置 > 1.5cm 且夹爪足够闭合。"""
+        qpos = self.agent.robot.get_qpos()          # (B, 9)
+        gripper_width = qpos[:, 7] + qpos[:, 8]    # 两指总宽度，open≈0.08m
+        cube_z = self.cube.pose.p[:, 2]
+        # cube 离开桌面（静止 z = TABLE_Z + BLOCK_HALF[2]），抬起 > 1.5cm
+        cube_lifted = cube_z > self.TABLE_Z + self.BLOCK_HALF_SIZE[2] + 0.015
+        # 方块宽 4cm，夹住时两指总宽 < 5cm
+        gripper_gripping = gripper_width < 0.05
+        return cube_lifted & gripper_gripping
 
     def evaluate(self):
         cube_pos   = self.cube.pose.p
@@ -468,18 +567,69 @@ class PickAndPlaceEnv(BaseEnv):
         qpos = self.agent.robot.get_qpos()  # (B, 9): joints 7&8 are fingers
         gripper_open = (qpos[:, 7] + qpos[:, 8]) > 0.03  # combined > 3 cm
 
-        return {"success": xy_ok & z_ok & upright_ok & vel_ok & angvel_ok & gripper_open}
+        # ── Grasp state tracking ────────────────────────────────────────────
+        is_grasped = self._is_cube_grasped()
+        if not hasattr(self, "consecutive_grasp"):
+            self.consecutive_grasp = torch.zeros(
+                self.num_envs, device=self.device, dtype=torch.long
+            )
+        self.consecutive_grasp[is_grasped] += 1
+        self.consecutive_grasp[~is_grasped] = 0
+
+        return {
+            "success": xy_ok & z_ok & upright_ok & vel_ok & angvel_ok & gripper_open,
+            "is_cube_grasped": is_grasped,
+            "consecutive_grasp": self.consecutive_grasp.clone().float(),
+        }
 
     def compute_dense_reward(self, obs, action, info):
-        cube_pos   = self.cube.pose.p
-        target_pos = self.target.pose.p
-        dist       = torch.norm(cube_pos - target_pos, dim=1)
-        reward     = 1 - torch.tanh(5 * dist)
-        reward[info["success"]] = 5.0
-        return reward
+        """
+        分阶段奖励设计（配合 use_rel_reward=True 使用增量信号）：
+
+          Stage 1 – 靠近物块  (未抓取时)：approach_reward ∈ [0, 0.1]
+          Stage 2 – 抓取保持  (已抓取时)：grasp_reward = 1.0 (绝对值，持续保持)
+          Stage 3 – 搬运      (已抓取时)：transport_reward ∈ [0, 0.5]，cube 越近 coaster 越高
+          Stage 4 – 成功             ：success_reward = 3.0
+
+        各关键时刻的 reward_diff（use_rel_reward 下的实际信号）：
+          抓取瞬间：≈ +1.0  (grasp 从 0 跳到 1.0，approach 消失)
+          搬运中：  > 0     (transport 随 cube 靠近递增)
+          成功瞬间：≈ +1.5  (3.0 - grasp 1.0 - transport≤0.5 > 0 ✓)
+          掉落时：  大负值  (grasp+transport 突然归零)
+        """
+        cube_pos   = self.cube.pose.p     # (B, 3)
+        target_pos = self.target.pose.p   # (B, 3)
+        tcp_pos    = self.agent.tcp.pose.p  # (B, 3)
+
+        is_grasped = info.get(
+            "is_cube_grasped",
+            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        )
+        is_grasped_f = is_grasped.float()
+
+        dist_tcp_to_cube    = torch.norm(tcp_pos - cube_pos, dim=1)
+        dist_cube_to_target = torch.norm(cube_pos - target_pos, dim=1)
+
+        # Stage 1: 靠近物块（未抓取阶段提供引导信号）
+        approach_reward = (1.0 - is_grasped_f) * (
+            1.0 - torch.tanh(5.0 * dist_tcp_to_cube)
+        ) * 0.1
+
+        # Stage 2: 持续抓取（绝对值保持，使 reward_diff 在抓取瞬间产生正 spike）
+        grasp_reward = is_grasped_f * 1.0
+
+        # Stage 3: 搬运（抓取状态下 cube 越靠近 coaster reward 越高）
+        transport_reward = is_grasped_f * (
+            1.0 - torch.tanh(5.0 * dist_cube_to_target)
+        ) * 0.5
+
+        # Stage 4: 成功（3.0 > grasp 1.0 + transport≤0.5，保证成功时 diff > 0）
+        success_reward = info["success"].float() * 3.0
+
+        return approach_reward + grasp_reward + transport_reward + success_reward
 
     def compute_normalized_dense_reward(self, obs, action, info):
-        return self.compute_dense_reward(obs, action, info) / 5.0
+        return self.compute_dense_reward(obs, action, info)
 
     # ── RLinf 接口：供 ManiskillEnv (wrap_obs_mode=raw) 使用 ────────────────
 
@@ -491,17 +641,22 @@ class PickAndPlaceEnv(BaseEnv):
 
         Returns:
             dict with keys:
-                main_images: (num_envs, H, W, 3) uint8, external_cam RGB
-                states:      (num_envs, 7) float32, [ee_pos(3), ee_euler(3), gripper(1)]
+                main_images:       (num_envs, H, W, 3) uint8, external_cam RGB
+                extra_view_images: (num_envs, 1, H, W, 3) uint8, back_cam RGB (if available)
+                states:            (num_envs, 7) float32, [ee_pos(3), ee_euler(3), gripper(1)]
                 task_descriptions: list[str]
         """
         obs_image = None
+        back_image = None
         if isinstance(raw_obs, dict):
             sensor_data = raw_obs.get("sensor_data", None)
             if isinstance(sensor_data, dict):
                 cam_data = sensor_data.get("external_cam", None)
                 if isinstance(cam_data, dict) and "rgb" in cam_data:
                     obs_image = cam_data["rgb"].to(torch.uint8)
+                back_data = sensor_data.get("back_cam", None)
+                if isinstance(back_data, dict) and "rgb" in back_data:
+                    back_image = back_data["rgb"].to(torch.uint8).unsqueeze(1)  # [B, 1, H, W, 3]
 
         if obs_image is None:
             # In state obs_mode, raw_obs may not contain sensor_data.
@@ -521,28 +676,12 @@ class PickAndPlaceEnv(BaseEnv):
                     frame = np.clip(frame, 0, 255).astype(np.uint8)
             obs_image = torch.from_numpy(frame).to(torch.uint8).unsqueeze(0)
 
-        # EE 位姿：机器人底座（世界原点）坐标系下的末端位姿
-        ee_pose_T = (
-            self.agent.ee_pose_at_robot_base.to_transformation_matrix()
-            .cpu()
-            .numpy()
-        )  # (num_envs, 4, 4)
-        pos = ee_pose_T[:, :3, 3]  # (num_envs, 3)
-
-        # 旋转矩阵 → ZYX 欧拉角（与 transforms3d mat2euler("sxyz") 等价）
-        euler = np.stack(
-            [Rotation.from_matrix(ee_pose_T[i, :3, :3]).as_euler("xyz") for i in range(self.num_envs)],
-            axis=0,
-        ).astype(np.float32)  # (num_envs, 3)
-
-        gripper_state = self.agent.robot.get_qpos().to(torch.float32)[:, -1:]  # (num_envs, 1)
-
-        pos_t    = torch.from_numpy(pos.astype(np.float32)).to(gripper_state.device)
-        euler_t  = torch.from_numpy(euler).to(gripper_state.device)
-        proprioception = torch.cat([pos_t, euler_t, gripper_state], dim=1)  # (num_envs, 7)
+        states_np, _ = build_blockpap_states_from_env(self, apply_bias=True)
+        proprioception = torch.from_numpy(states_np).to(obs_image.device)
 
         return {
             "main_images": obs_image,
+            "extra_view_images": back_image,
             "states": proprioception,
             "task_descriptions": self.get_language_instruction(),
         }
@@ -647,7 +786,7 @@ if __name__ == "__main__":
         print(f"  杯垫位置 : ({coaster_p[0]:.4f}, {coaster_p[1]:.4f}, {coaster_p[2]:.4f})")
 
         # GPU tensor 是原地更新的视图，每步立即转 numpy 拷贝，两个相机共用同一段轨迹
-        _CAMS = ["external_cam", "side_cam"]
+        _CAMS = ["external_cam", "back_cam"]
         video_frames = {cam: [get_frame(obs, cam)] for cam in _CAMS}
         for _ in range(60):
             action = env.action_space.sample()
@@ -668,14 +807,14 @@ if __name__ == "__main__":
         )
 
         # ── 正面相机 → render/traj... ────────────────────────────────────
-        front_dir = f"{RENDER_BASE_DIR}/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
+        front_dir = f"{RENDER_BASE_DIR}/BlockPAP/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
         front_ref = f"{_REF_BASE}/front/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
         # video_frames[cam][0] 是 reset 后立即拷贝的初始帧，用于截图和对比图
         save_cam_outputs(video_frames["external_cam"][0], front_dir, "external_cam", front_ref, _step_frames)
 
-        # ── 侧后方相机 → render/side_cam/traj... ────────────────────────
-        back_dir  = f"{RENDER_BASE_DIR}/side_cam/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
+        # ── 后方相机 → render/back_cam/traj... ────────────────────────
+        back_dir  = f"{RENDER_BASE_DIR}/BlockPAP/back_cam/traj{TRAJ_ID}/{CAM_T}/{_REF_LABEL}"
         back_ref  = f"{_REF_BASE}/back/BlockPAP_traj{TRAJ_ID}_t{_REF_LABEL}.png"
-        save_cam_outputs(video_frames["side_cam"][0], back_dir, "side_cam", back_ref, _step_frames)
+        save_cam_outputs(video_frames["back_cam"][0], back_dir, "back_cam", back_ref, _step_frames)
 
     env.close()

@@ -1223,6 +1223,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 f"not support such model type {self.cfg.actor.model.model_type} for SFT right now."
             )
 
+    # TODO: BUG - 函数签名需改为返回 total_loss:
+    #   def _train_sft_epoch(self, metrics_data, loss) -> torch.Tensor:
+    #       ...
+    #       return total_loss   # 而不是 loss = total_loss（局部变量，调用方不可见）
+    # 调用处（L1445-1446）需改为：
+    #   if self.enable_sft_co_train:
+    #       loss = self._train_sft_epoch(metrics_data, loss)
     def _train_sft_epoch(
         self, metrics_data: dict[str, torch.Tensor], loss: torch.Tensor
     ):
@@ -1263,7 +1270,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         sft_loss = sft_losses.mean()
         metrics_data["sft_loss"] = sft_loss.clone().detach().item()
         total_loss = loss + self.sft_loss_weight * sft_loss
-        loss = total_loss
+        loss = total_loss  # TODO: BUG - 仅重绑定局部变量，调用方 loss 不受影响，sft 梯度从未 backward
+                           #   修复：删除此行，改为 return total_loss，并在调用处 loss = self._train_sft_epoch(...)
 
         metrics_data["loss_ratio"] = (
             np.abs(metrics_data["sft_loss"]) / np.abs(metrics_data["ppo_loss"])

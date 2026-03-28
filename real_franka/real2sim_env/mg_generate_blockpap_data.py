@@ -18,6 +18,7 @@ Output layout:
     videos/
       chunk-000/observation.images.image/episode_000000.mp4
       chunk-000/observation.images.wrist_image/episode_000000.mp4  (black — no wrist cam)
+      chunk-000/observation.images.back_image/episode_000000.mp4
       ...
 
 Multi-GPU (6 workers, GPUs 0-5):
@@ -93,7 +94,7 @@ def create_task_spec():
 
 # ── LeRobot v2.1 format helpers ───────────────────────────────────────────────
 
-_VIDEO_KEYS = ["observation.images.image", "observation.images.wrist_image"]
+_VIDEO_KEYS = ["observation.images.image", "observation.images.wrist_image", "observation.images.back_image"]
 _GRIPPER_OPEN_THRESHOLD_M = 0.04
 
 
@@ -139,6 +140,10 @@ def _obs_list_to_state_action(obs_list):
     states[:, :3] = ee_pos
     states[:, 3:6] = euler
     states[:, 6]   = gripper
+
+    # Match SFT training convention: z+10cm, euler_z-45°
+    states[:, 2] += 0.1
+    states[:, 5] += -np.pi / 4
 
     actions = np.zeros((T, 7), dtype=np.float32)
     for t in range(T - 1):
@@ -198,16 +203,40 @@ def _trim_episode(obs_list, state_vecs,
 
 
 def _collect_replay_frames(env, state_vecs, frame_skip=1):
-    """Replay env states (no physics) and collect RGB frames."""
-    frames = []
+    """Replay env states (no physics) and collect RGB frames from front + side cameras.
+    Both cameras use the sensor pipeline (no sky shader) → black background."""
+    front_frames, side_frames = [], []
+    front_sensor = env.base_env._sensors.get("external_cam")
+    side_sensor  = env.base_env._sensors.get("back_cam")
+
+    def _sensor_to_rgb(sensor):
+        sensor.capture()
+        obs = sensor.get_obs(rgb=True, depth=False, position=False, segmentation=False)
+        rgb = obs["rgb"]
+        if hasattr(rgb, "cpu"):
+            rgb = rgb.cpu().numpy()
+        rgb = np.asarray(rgb)
+        if rgb.ndim == 4:
+            rgb = rgb[0]
+        if rgb.dtype != np.uint8:
+            rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+        return rgb
+
     for t, sv in enumerate(state_vecs):
         if t % frame_skip != 0:
             continue
         env.reset_to({"states": sv}, step_sim=False)
-        frame = env.render(mode="rgb_array")
-        if frame is not None:
-            frames.append(frame.copy())
-    return frames
+        # front: use external_cam sensor for consistent black background
+        if front_sensor is not None:
+            front_frames.append(_sensor_to_rgb(front_sensor))
+        else:
+            frame = env.render(mode="rgb_array")
+            if frame is not None:
+                front_frames.append(frame.copy())
+        # side
+        if side_sensor is not None:
+            side_frames.append(_sensor_to_rgb(side_sensor))
+    return front_frames, side_frames
 
 
 def _encode_video(frames, path, fps, codec="libx264", pix_fmt="yuv420p", img_size=None):
@@ -240,7 +269,7 @@ def _encode_video(frames, path, fps, codec="libx264", pix_fmt="yuv420p", img_siz
         raise RuntimeError(f"ffmpeg returned {rc} encoding {path}")
 
 
-def _write_episode_parquet(path, states, actions, frames, ep_idx, frame_offset, fps, img_size):
+def _write_episode_parquet(path, states, actions, frames, side_frames, ep_idx, frame_offset, fps, img_size):
     """Write one episode to parquet with inline images + state/action/timestamps/indices."""
     from datasets import Dataset, Features, Sequence, Value, Image as ImageFeature
     from PIL import Image as PIL_Image
@@ -266,9 +295,22 @@ def _write_episode_parquet(path, states, actions, frames, ep_idx, frame_offset, 
 
     black_pil = [PIL_Image.fromarray(bk)] * T
 
+    # side camera frames
+    if side_frames and len(side_frames) == T:
+        if img_size is not None:
+            side_pil = [
+                PIL_Image.fromarray(_cv2.resize(f, (img_size, img_size)))
+                for f in side_frames
+            ]
+        else:
+            side_pil = [PIL_Image.fromarray(f) for f in side_frames]
+    else:
+        side_pil = black_pil
+
     features = Features({
         "image":         ImageFeature(),
         "wrist_image":   ImageFeature(),
+        "back_image":    ImageFeature(),
         "state":         Sequence(Value("float32"), length=7),
         "actions":       Sequence(Value("float32"), length=7),
         "timestamp":     Value("float32"),
@@ -280,6 +322,7 @@ def _write_episode_parquet(path, states, actions, frames, ep_idx, frame_offset, 
     data = {
         "image":         front_pil,
         "wrist_image":   black_pil,
+        "back_image":    side_pil,
         "state":         states.tolist(),
         "actions":       actions.tolist(),
         "timestamp":     (np.arange(T, dtype=np.float32) / fps).tolist(),
@@ -308,15 +351,15 @@ def _episode_video_path(base_dir, video_key, ep_idx, chunks_size):
 
 def _write_lerobot_episode(
     base_dir, ep_idx, frame_offset, states, actions,
-    frames, chunks_size, fps, codec, pix_fmt, img_size, task_text
+    frames, side_frames, chunks_size, fps, codec, pix_fmt, img_size, task_text
 ):
-    """Write parquet + 2 videos for one episode (front cam + black wrist cam).
+    """Write parquet + 3 videos for one episode (front cam + black wrist cam + side cam).
     Returns the episodes_stats record for this episode."""
     T = len(states)
 
     # Parquet (with inline PIL images)
     parquet_path = _episode_parquet_path(base_dir, ep_idx, chunks_size)
-    _write_episode_parquet(parquet_path, states, actions, frames, ep_idx, frame_offset, fps, img_size)
+    _write_episode_parquet(parquet_path, states, actions, frames, side_frames, ep_idx, frame_offset, fps, img_size)
 
     # Front camera video
     front_path = _episode_video_path(base_dir, "observation.images.image", ep_idx, chunks_size)
@@ -330,11 +373,15 @@ def _write_lerobot_episode(
     wrist_path = _episode_video_path(base_dir, "observation.images.wrist_image", ep_idx, chunks_size)
     _encode_video(black_frames, wrist_path, fps, codec, pix_fmt, img_size)
 
+    # Side camera video
+    side_path = _episode_video_path(base_dir, "observation.images.back_image", ep_idx, chunks_size)
+    _encode_video(side_frames if side_frames else black_frames, side_path, fps, codec, pix_fmt, img_size)
+
     # episodes.jsonl entry
     _append_episode_meta(base_dir, ep_idx, T, task_text)
 
     # Compute and return stats (caller decides where to write)
-    return _compute_episode_stats(states, actions, frames, ep_idx, frame_offset, fps)
+    return _compute_episode_stats(states, actions, frames, side_frames, ep_idx, frame_offset, fps)
 
 
 def _append_episode_meta(base_dir, ep_idx, length, task_text):
@@ -374,7 +421,7 @@ def _image_channel_stats_np(frames):
             "mean": nested(ch_mean), "std": nested(ch_std), "count": [n]}
 
 
-def _compute_episode_stats(states, actions, frames, ep_idx, frame_offset, fps):
+def _compute_episode_stats(states, actions, frames, side_frames, ep_idx, frame_offset, fps):
     """Compute episodes_stats record for one episode from raw numpy arrays."""
     T = len(states)
 
@@ -396,14 +443,17 @@ def _compute_episode_stats(states, actions, frames, ep_idx, frame_offset, fps):
     # wrist camera is always black in this sim dataset
     h, w = (frames[0].shape[:2] if frames else (480, 640))
     wrist_stats = _image_channel_stats_np([np.zeros((h, w, 3), dtype=np.uint8)] * T)
+    side_stats  = _image_channel_stats_np(side_frames) if side_frames else wrist_stats
 
     return {
         "episode_index": ep_idx,
         "stats": {
             "observation.images.image":       img_stats,
             "observation.images.wrist_image": wrist_stats,
+            "observation.images.back_image":  side_stats,
             "image":         img_stats,
             "wrist_image":   wrist_stats,
+            "back_image":    side_stats,
             "state":         vec_stats(states),
             "actions":       vec_stats(actions),
             "timestamp":     scalar_stats(timestamps),
@@ -465,12 +515,23 @@ def _write_lerobot_meta(base_dir, total_episodes, total_frames,
                 "shape": [3, img_h, img_w],
                 "info":  video_info,
             },
+            "observation.images.back_image": {
+                "names": ["channel", "height", "width"],
+                "dtype": "video",
+                "shape": [3, img_h, img_w],
+                "info":  video_info,
+            },
             "image": {
                 "dtype": "image",
                 "shape": [img_h, img_w, 3],
                 "names": ["height", "width", "channel"],
             },
             "wrist_image": {
+                "dtype": "image",
+                "shape": [img_h, img_w, 3],
+                "names": ["height", "width", "channel"],
+            },
+            "back_image": {
                 "dtype": "image",
                 "shape": [img_h, img_w, 3],
                 "names": ["height", "width", "channel"],
@@ -730,7 +791,7 @@ def _worker_generate(
             T = len(states)
 
             # Render frames by replaying (already-subsampled) env states
-            frames = _collect_replay_frames(env, state_vecs, frame_skip=1)
+            frames, side_frames = _collect_replay_frames(env, state_vecs, frame_skip=1)
 
             # Write parquet + videos for this episode
             stats_record = _write_lerobot_episode(
@@ -740,6 +801,7 @@ def _worker_generate(
                 states       = states,
                 actions      = actions,
                 frames       = frames,
+                side_frames  = side_frames,
                 chunks_size  = chunks_size,
                 fps          = fps,
                 codec        = codec,

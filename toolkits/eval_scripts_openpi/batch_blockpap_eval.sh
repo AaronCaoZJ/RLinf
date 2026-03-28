@@ -8,17 +8,20 @@ EPISODES_PER_GPU=16             # episodes per GPU → total = len(GPUS) * EPISO
 TILE_VIDEOS=true             # true: tile all saved videos into one grid video
 TILE_COLS=4                  # videos per row in the tiled output
 
-# CKPT_DIR=/workspace1/zhijun/pi-StepNFT/logs/20260322-04:04:16-arc_blockpap_nft_actor_openpi_pi05/blockpap_nft_openpi_pi05
-# STEP=20
-CKPT_DIR=/workspace1/zhijun/RLinf/logs/20260317-14:18:32/new_norm_stats_stride2
-STEP=15000
+# CKPT_DIR=/workspace1/zhijun/pi-StepNFT/logs/20260324-00:37:54-arc_blockpap_nft_actor_openpi_pi05/blockpap_nft_pi05_chunk8
+# STEP=30
+CKPT_DIR=/workspace1/zhijun/RLinf/logs/20260325-14:51:32/new_norm_stats_stride2
+STEP=5000
 NORM_STATS=../hf_download/models/pi05_base
 # 0、15、25、40、45 或 random
 TRAJ_ID=random
 BIAS=true
+# Extra camera: "" = disabled (single cam), "back_cam" = front+back cameras
+EXTRA_CAM="back_cam"
 LOG_DIR=/workspace1/zhijun/RLinf/eval/blockpap
 BIAS_TAG=$([ "${BIAS,,}" = "true" ] && echo "bias" || echo "no_bias")
-EXP_NAME=0323_pi05_${BIAS_TAG}_${TRAJ_ID}_${STEP}_stride2_chunk5
+CAM_TAG=$([ -n "${EXTRA_CAM}" ] && echo "_${EXTRA_CAM}" || echo "")
+EXP_NAME=0326_pi05_${BIAS_TAG}_${TRAJ_ID}_${STEP}_stride2${CAM_TAG}
 
 
 # ── Launch one eval process per GPU in parallel ───────────────────────────────
@@ -27,7 +30,7 @@ GPU_LOG_DIRS=()
 
 for i in "${!GPUS[@]}"; do
     GPU=${GPUS[$i]}
-    SEED=$((0 + i * 1000))          # different seed per GPU → different episodes
+    SEED=$((42 + i * 1000))          # different seed per GPU → different episodes
     GPU_LOG_DIR="${LOG_DIR}/${EXP_NAME}/gpu${GPU}"
     GPU_LOG_DIRS+=("${GPU_LOG_DIR}")
     mkdir -p "${GPU_LOG_DIR}"
@@ -39,17 +42,18 @@ for i in "${!GPUS[@]}"; do
         --norm_stats_path "${NORM_STATS}" \
         --num_episodes  ${EPISODES_PER_GPU} \
         --max_steps     600 \
-        --action_chunk  5 \
+        --action_chunk  8 \
         --num_steps     5 \
         --traj_id       "${TRAJ_ID}" \
         --num_save_videos ${EPISODES_PER_GPU} \
         --log_interval  50 \
         --seed          ${SEED} \
         --state_bias    "${BIAS}" \
+        ${EXTRA_CAM:+--extra_cam "${EXTRA_CAM}"} \
         > "${GPU_LOG_DIR}/run.log" 2>&1 &
 
     PIDS+=($!)
-    echo "[GPU ${GPU}] pid=$! seed=${SEED} log=${GPU_LOG_DIR}/run.log"
+    echo "[GPU ${GPU}] pid=$! seed=${SEED} extra_cam=${EXTRA_CAM:-none} log=${GPU_LOG_DIR}/run.log"
 done
 
 # ── Wait for all to finish ────────────────────────────────────────────────────

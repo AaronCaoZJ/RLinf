@@ -167,7 +167,7 @@ def write_info_json(meta_dir: str, first_info: dict, total_episodes: int, total_
         "total_episodes": int(total_episodes),
         "total_frames": int(total_frames),
         "total_tasks": int(total_tasks),
-        "total_videos": int(total_episodes * 2),
+        "total_videos": int(total_episodes * 3),
         "total_chunks": int((total_episodes + chunk_size - 1) // chunk_size),
         "chunks_size": int(chunk_size),
         "fps": float(fps),
@@ -187,12 +187,23 @@ def write_info_json(meta_dir: str, first_info: dict, total_episodes: int, total_
                 "shape": [3, int(image_height), int(image_width)],
                 "info": video_info,
             },
+            "observation.images.back_image": {
+                "names": ["channel", "height", "width"],
+                "dtype": "video",
+                "shape": [3, int(image_height), int(image_width)],
+                "info": video_info,
+            },
             "image": {
                 "dtype": "image",
                 "shape": [int(image_height), int(image_width), 3],
                 "names": ["height", "width", "channel"],
             },
             "wrist_image": {
+                "dtype": "image",
+                "shape": [int(image_height), int(image_width), 3],
+                "names": ["height", "width", "channel"],
+            },
+            "back_image": {
                 "dtype": "image",
                 "shape": [int(image_height), int(image_width), 3],
                 "names": ["height", "width", "channel"],
@@ -259,7 +270,7 @@ def merge_datasets(dataset_paths: list, output_path: str, chunk_size: int = 1000
     if os.path.exists(stats_out_path):
         os.remove(stats_out_path)
 
-    video_keys = ["observation.images.image", "observation.images.wrist_image"]
+    video_keys = ["observation.images.image", "observation.images.wrist_image", "observation.images.back_image"]
     first_info = ds_metas[0][0]
 
     global_ep_offset = 0   # running new episode index

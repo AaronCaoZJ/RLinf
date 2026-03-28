@@ -304,22 +304,22 @@ def load_hdf5(hdf5_path: str):
         # Load images
         front_imgs = None
         wrist_imgs = None
-        left_imgs = None
+        back_imgs = None
 
         if "observations" in f and "images" in f["observations"]:
             imgs = f["observations"]["images"]
             # image       ← camera_left_color  (正前方全景, 对应原始 1.mp4)
             # wrist_image ← camera_wrist_color  (腕部俯视,   对应原始 0.mp4)
-            # camera_front_color 是侧后相机 (2.mp4), 不使用
+            # back_image  ← camera_front_color  (侧后相机,   对应原始 2.mp4)
             if "camera_left_color" in imgs:
                 front_imgs = imgs["camera_left_color"][:]
-            elif "camera_front_color" in imgs:
-                front_imgs = imgs["camera_front_color"][:]
             if "camera_wrist_color" in imgs:
                 wrist_imgs = imgs["camera_wrist_color"][:]
+            if "camera_front_color" in imgs:
+                back_imgs = imgs["camera_front_color"][:]
             if front_imgs is None:
                 raise KeyError(f"Cannot find camera_left_color in {hdf5_path}")
-        # wrist camera is optional — missing ones will be filled with black frames
+        # wrist and left cameras are optional — missing ones will be filled with black frames
 
         # Load timestamps
         timestamps = None
@@ -334,6 +334,8 @@ def load_hdf5(hdf5_path: str):
         T = min(T, len(front_imgs))
     if wrist_imgs is not None:
         T = min(T, len(wrist_imgs))
+    if back_imgs is not None:
+        T = min(T, len(back_imgs))
     if timestamps is not None:
         T = min(T, len(timestamps))
 
@@ -341,14 +343,16 @@ def load_hdf5(hdf5_path: str):
     # Fill missing optional cameras with black frames matching front camera shape
     black = np.zeros_like(front_imgs)
     wrist_imgs = wrist_imgs[:T] if wrist_imgs is not None else black
+    back_imgs = back_imgs[:T] if back_imgs is not None else black
 
-    return ee_pose[:T], front_imgs, wrist_imgs, timestamps[:T] if timestamps is not None else None
+    return ee_pose[:T], front_imgs, wrist_imgs, back_imgs, timestamps[:T] if timestamps is not None else None
 
 
 def build_episode_data(
     ee_pose: np.ndarray,
     front_imgs: np.ndarray,
     wrist_imgs: np.ndarray,
+    back_imgs: np.ndarray,
     timestamps: Optional[np.ndarray],
     episode_index: int,
     fps: float,
@@ -377,17 +381,20 @@ def build_episode_data(
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             return list(executor.map(resize_single, imgs))
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             "front": executor.submit(resize_batch, front_imgs, image_height, image_width),
             "wrist": executor.submit(resize_batch, wrist_imgs, image_height, image_width),
+            "left": executor.submit(resize_batch, back_imgs, image_height, image_width),
         }
         front_resized = futures["front"].result()
         wrist_resized = futures["wrist"].result()
+        back_resized = futures["left"].result()
 
     data = {
         "image": front_resized,
         "wrist_image": wrist_resized,
+        "back_image": back_resized,
         "state": states.tolist(),
         "actions": actions.tolist(),
         "timestamp": timestamps.tolist(),
@@ -444,14 +451,17 @@ def compute_episode_stats(data: dict, episode_index: int) -> dict:
 
     img_stats = _image_channel_stats(data["image"])
     wrist_stats = _image_channel_stats(data["wrist_image"])
+    back_stats = _image_channel_stats(data["back_image"])
 
     return {
         "episode_index": episode_index,
         "stats": {
             "observation.images.image": img_stats,
             "observation.images.wrist_image": wrist_stats,
+            "observation.images.back_image": back_stats,
             "image": img_stats,
             "wrist_image": wrist_stats,
+            "back_image": back_stats,
             "state": vec_stats("state"),
             "actions": vec_stats("actions"),
             "timestamp": scalar_stats("timestamp"),
@@ -476,6 +486,7 @@ def save_episode_with_datasets(data: dict, out_path: str):
         {
             "image": ImageFeature(),
             "wrist_image": ImageFeature(),
+            "back_image": ImageFeature(),
             "state": Sequence(Value("float32"), length=7),
             "actions": Sequence(Value("float32"), length=7),
             "timestamp": Value("float32"),
@@ -556,7 +567,7 @@ def write_info_json(
         "total_episodes": int(total_episodes),
         "total_frames": int(total_frames),
         "total_tasks": int(total_tasks),
-        "total_videos": int(total_episodes * 2),
+        "total_videos": int(total_episodes * 3),
         "total_chunks": int((total_episodes + chunk_size - 1) // chunk_size),
         "chunks_size": int(chunk_size),
         "fps": float(fps),
@@ -576,12 +587,23 @@ def write_info_json(
                 "shape": [3, int(image_height), int(image_width)],
                 "info": video_info,
             },
+            "observation.images.back_image": {
+                "names": ["channel", "height", "width"],
+                "dtype": "video",
+                "shape": [3, int(image_height), int(image_width)],
+                "info": video_info,
+            },
             "image": {
                 "dtype": "image",
                 "shape": [int(image_height), int(image_width), 3],
                 "names": ["height", "width", "channel"],
             },
             "wrist_image": {
+                "dtype": "image",
+                "shape": [int(image_height), int(image_width), 3],
+                "names": ["height", "width", "channel"],
+            },
+            "back_image": {
                 "dtype": "image",
                 "shape": [int(image_height), int(image_width), 3],
                 "names": ["height", "width", "channel"],
@@ -659,7 +681,7 @@ def convert_cleaned_dataset(
             os.makedirs(chunk_dir, exist_ok=True)
 
             # Load data
-            ee_pose, front_imgs, wrist_imgs, timestamps = load_hdf5(h5p)
+            ee_pose, front_imgs, wrist_imgs, back_imgs, timestamps = load_hdf5(h5p)
 
             # frame_offset tracks the global frame index start for this episode
             frame_offset = episode_offset_frames + total_frames
@@ -668,6 +690,7 @@ def convert_cleaned_dataset(
                 ee_pose=ee_pose,
                 front_imgs=front_imgs,
                 wrist_imgs=wrist_imgs,
+                back_imgs=back_imgs,
                 timestamps=timestamps,
                 episode_index=ep_idx,
                 fps=fps,
@@ -690,6 +713,7 @@ def convert_cleaned_dataset(
             # Save videos
             # observation.images.image       ← front camera  (data["image"],       camera_left_color)
             # observation.images.wrist_image ← wrist camera  (data["wrist_image"], camera_wrist_color)
+            # observation.images.back_image  ← side camera   (data["back_image"],  camera_front_color)
             video_chunk_dir = os.path.join(output_root, "videos", f"chunk-{chunk_id:03d}")
             _encode_video_from_pil(
                 data["image"],
@@ -699,6 +723,11 @@ def convert_cleaned_dataset(
             _encode_video_from_pil(
                 data["wrist_image"],
                 os.path.join(video_chunk_dir, f"observation.images.wrist_image/episode_{ep_idx:06d}.mp4"),
+                fps=fps,
+            )
+            _encode_video_from_pil(
+                data["back_image"],
+                os.path.join(video_chunk_dir, f"observation.images.back_image/episode_{ep_idx:06d}.mp4"),
                 fps=fps,
             )
 

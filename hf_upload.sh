@@ -1,5 +1,6 @@
-CKPT_DIR=/workspace1/zhijun/RLinf/logs/20260317-14:18:32/new_norm_stats_stride2/checkpoints
-REPO=aaroncaozj/pi05_aligned_co-sft_blockpap
+CKPT_DIR=/workspace1/zhijun/RLinf/logs/20260325-14:51:32/new_norm_stats_stride2/checkpoints
+# REPO=aaroncaozj/pi05_co-sft_blockpap_front-back
+REPO=aaroncaozj/pi05_real-sft_blockstack
 TYPE=model
 NUM_WORKERS=32
 
@@ -11,16 +12,22 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # # Upload the norm stats
 # python hf_upload.py \
-#   --path /workspace1/zhijun/hf_download/models/pi05_base/BlockPAP-v1_Mix \
+#   --path /workspace1/zhijun/hf_download/models/pi05_base/BlockPAP-v0_Mix \
 #   --repo aaroncaozj/pi05_norm_stats_collection \
 #   --type model \
-#   --path-in-repo BlockPAP-v1_Mix
+#   --path-in-repo BlockPAP-v0_Mix
 
 # python hf_upload.py \
-#   --path ${CKPT_DIR}/global_step_5000 \
+#   --path ${CKPT_DIR}/global_step_15000/actor/model_state_dict \
 #   --repo ${REPO} \
 #   --type ${TYPE} \
-#   --path-in-repo global_step_5000
+#   --path-in-repo global_step_15000/actor/model_state_dict
+
+python hf_upload.py \
+  --path /workspace1/zhijun/RLinf/logs/20260326-17:46:58/real_3cam/checkpoints/global_step_5000/actor/model_state_dict \
+  --repo ${REPO} \
+  --type ${TYPE} \
+  --path-in-repo global_step_5000/actor/model_state_dict
 
 # python hf_upload.py \
 #   --path ${CKPT_DIR}/global_step_15000 \
@@ -36,8 +43,8 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 #   --type dataset \
 #   --num-workers ${NUM_WORKERS}
 
-python hf_upload.py \
-  --path /workspace1/zhijun/mg_dataset/blockstack_sub-opt_cleaned_real \
-  --repo aaroncaozj/BlockStack-v1_sub-opt_Real \
-  --type dataset \
-  --num-workers ${NUM_WORKERS}
+# python hf_upload.py \
+#   --path /workspace1/zhijun/mg_dataset/BlockPAP-v1_Mix \
+#   --repo aaroncaozj/BlockPAP-v1_Mix \
+#   --type dataset \
+#   --num-workers ${NUM_WORKERS}

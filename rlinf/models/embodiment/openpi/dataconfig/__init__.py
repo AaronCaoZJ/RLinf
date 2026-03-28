@@ -308,6 +308,25 @@ _CONFIGS = [
         pytorch_weight_path="checkpoints/torch/pi0_base",
     ),
     TrainConfig(
+        name="pi05_blockstack_real",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=8, discrete_state_input=False
+        ),
+        data=LeRobotFrankaEEDataConfig(
+            repo_id="BlockStack-v1_Real",
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_blockstack_real/assets"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=16,
+    ),
+    TrainConfig(
         name="pi05_blockpap_mix",
         model=pi0_config.Pi0Config(
             pi05=True, action_horizon=8, discrete_state_input=False

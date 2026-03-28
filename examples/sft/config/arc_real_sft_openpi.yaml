@@ -1,0 +1,83 @@
+defaults:
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: 2-5
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf_blockstack_real_sft
+    experiment_name: "real_3cam"
+    logger_backends: ["wandb"]
+    wandb_entity: "aaroncaozj_team"
+
+  max_epochs: 100000
+  max_steps: -1
+  val_check_interval: -1
+  save_interval: 5000
+
+data:
+  train_data_paths: "/workspace1/zhijun/mg_dataset"   # ← 换成你的 real data 路径
+
+algorithm:
+  adv_type: gae
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 64
+  global_batch_size: 256
+  seed: 0
+
+  model:
+    precision: null
+    model_path: "../hf_download/models/pi05_base"
+    num_action_chunks: 8
+    num_steps: 5
+    add_value_head: False
+    openpi:
+      config_name: "pi05_blockstack_real"
+      num_images_in_input: 3
+      detach_critic_input: True
+      action_subsample_stride: 1
+
+  optim:
+    lr: 2.5e-5
+    value_lr: 1.55e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    lr_scheduler: "cosine"
+    lr_warmup_steps: 1000
+    total_training_steps: 30000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

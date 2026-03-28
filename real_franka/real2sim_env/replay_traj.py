@@ -164,7 +164,7 @@ def main():
                         help="PD damping for gripper joints (keep ~100, not 2000)")
     parser.add_argument("--gripper-force-limit", type=float, default=500.0)
     parser.add_argument("--side-cam", type=str, default=None,
-                        help="Sensor camera name for back/side view (e.g. 'side_cam'). "
+                        help="Sensor camera name for back view (e.g. 'back_cam'). "
                              "When set, saves a separate replay_back.mp4 alongside the front video.")
     parser.add_argument("--cam-t", type=str, default="og",
                         choices=["og", "0302", "0303"],
@@ -212,7 +212,7 @@ def main():
 
     # ── Create env ───────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    side_cam_name = args.side_cam  # e.g. "side_cam", or None
+    side_cam_name = args.side_cam  # e.g. "back_cam", or None
     env = gym.make("BlockPAP-v1", obs_mode=args.obs_mode, render_mode=args.render_mode,
                    cam_t=args.cam_t)
     print(f"Camera _t preset: '{args.cam_t}'")
