@@ -10,12 +10,12 @@ cd /workspace1/zhijun/RLinf
 export HF_HUB_DISABLE_XET=1
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# # Upload the norm stats
-# python hf_upload.py \
-#   --path /workspace1/zhijun/hf_download/models/pi05_base/BlockPAP-v0_Mix \
-#   --repo aaroncaozj/pi05_norm_stats_collection \
-#   --type model \
-#   --path-in-repo BlockPAP-v0_Mix
+# Upload the norm stats
+python hf_upload.py \
+  --path /workspace1/zhijun/hf_download/models/pi05_base/BlockStack-v1_Real \
+  --repo aaroncaozj/pi05_norm_stats_collection \
+  --type model \
+  --path-in-repo BlockStack-v1_Real
 
 # python hf_upload.py \
 #   --path ${CKPT_DIR}/global_step_15000/actor/model_state_dict \
@@ -23,11 +23,11 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 #   --type ${TYPE} \
 #   --path-in-repo global_step_15000/actor/model_state_dict
 
-python hf_upload.py \
-  --path /workspace1/zhijun/RLinf/logs/20260326-17:46:58/real_3cam/checkpoints/global_step_5000/actor/model_state_dict \
-  --repo ${REPO} \
-  --type ${TYPE} \
-  --path-in-repo global_step_5000/actor/model_state_dict
+# python hf_upload.py \
+#   --path /workspace1/zhijun/RLinf/logs/20260326-17:46:58/real_3cam/checkpoints/global_step_5000/actor/model_state_dict \
+#   --repo ${REPO} \
+#   --type ${TYPE} \
+#   --path-in-repo global_step_5000/actor/model_state_dict
 
 # python hf_upload.py \
 #   --path ${CKPT_DIR}/global_step_15000 \

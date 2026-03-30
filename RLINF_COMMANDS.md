@@ -109,6 +109,7 @@ bash examples/sft/run_vla_sft.sh arc_real_sft_openpi.yaml
 
 ```bash
 bash toolkits/eval_scripts_openpi/blockpap_eval.sh
+bash toolkits/eval_scripts_openpi/batch_blockpap_eval.sh
 ```
 
 ## 👉 [pi-StepNFT Forked Repo](https://github.com/AaronCaoZJ/pi-StepNFT)
@@ -144,10 +145,80 @@ bash examples/embodiment/run_embodiment.sh arc_maniskill_nft_actor_openpi_pi05 #
 bash examples/embodiment/run_embodiment.sh arc_blockpap_nft_actor_openpi_pi05 # blockpap nft rl
 ```
 
-### 多相机输入
+#TODO
 
-| 来源 | 转换过程 | 最终 key |
+## 多相机输入
+
+### 各路径的 key 转换
+
+| 来源 | 转换过程 | 最终 key（送入模型前） |
 | :--- | :--- | :--- |
-| SFT dataset | 直接存储 | `observation/back_image` |
-| NFT rollout | `extra_view_images` → `obs_processor` | `observation/back_image` |
-| Eval 脚本 | `get_image(obs, "back_cam")` → 直接赋值 | `observation/back_image` |
+| SFT dataset (RLinf) | HF 数据集存 `back_image` → `RepackTransform` 加前缀 → `FrankaEEInputs` 读取 | `observation/back_image` |
+| NFT rollout (pi-StepNFT) | env `extra_view_images` → `obs_processor` 写入 → `FrankaEEInputs` 读取 | `observation/back_image` |
+| Eval 脚本 (RLinf) | `get_image(obs, "back_cam")` → 直接赋值 | `observation/back_image` |
+
+> `left_wrist_0_rgb` 对应 back camera，`right_wrist_0_rgb` 对应 wrist camera，命名源自 pi0 原始模型 slot 约定。
+
+### `num_images_in_input` 的实际作用
+
+| 场景 | 作用 |
+| :--- | :--- |
+| SFT (RLinf) | `_LimitImageInputsDataset` 用此值过滤数据集 view 数量（真正起过滤作用） |
+| NFT rollout (pi-StepNFT) | **不**控制模型输入，仅影响 value head 的 `prefix_mask`（`[True]*256*N + [False]*256*(3-N)`） |
+| Eval | 不使用 |
+
+需与实际使用的相机数量保持一致，否则 value head prefix_mask 会错误。
+
+### NFT 多相机配置（pi-StepNFT，已实装）
+
+```yaml
+actor:
+  model:
+    openpi:
+      num_images_in_input: 1          # 同步更新，供 value head prefix_mask 使用
+      image_input_views: ["image"]    # 控制 obs_processor 写哪些 key → 模型实际输入
+      # 可选：
+      # ["image"]                             → 仅主相机（back_cam 数据被丢弃）
+      # ["image", "back_image"]               → 主相机 + back_cam
+      # ["image", "back_image", "wrist_image"] → 三相机
+```
+
+`image_input_views` 为空时退回旧行为（传所有可用 view）。
+
+### BlockPAP 环境的相机注册
+
+BlockPAP-v1 始终在 `_default_sensor_configs` 注册两台传感器：
+- `external_cam`（主相机）→ env obs `main_images`
+- `back_cam`（侧后方）→ env obs `extra_view_images`
+
+无论 `image_input_views` 如何设置，env 都产出两路图像。`image_input_views` 只决定哪路数据被写入 `processed_obs` 并送入模型。
+
+### 视频渲染是否显示 back 视角
+
+由 `video_cfg.show_extra_views` 独立控制，与 `image_input_views` 无关（已加入 blockpap yaml）：
+
+```yaml
+env:
+  train:
+    video_cfg:
+      show_extra_views: False   # False=只录主相机；True=主相机+back_cam 并排
+```
+
+### SFT 多相机配置（RLinf）
+
+```yaml
+data:
+  image_input_views: ["image", "back_image"]  # _LimitImageInputsDataset 过滤用
+
+actor:
+  model:
+    openpi:
+      num_images_in_input: 2   # 需与 image_input_views 长度一致
+```
+
+### Eval 多相机配置（RLinf）
+
+```bash
+python blockpap_eval.py --extra_cam back_cam   # 启用 back camera
+# 不加 --extra_cam 则只用主相机
+```
