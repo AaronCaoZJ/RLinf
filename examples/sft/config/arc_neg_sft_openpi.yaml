@@ -13,14 +13,14 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor: 2-5
+    actor: 4-5
 
 runner:
   task_type: sft
   logger:
     log_path: "../results"
-    project_name: rlinf_blockstack_real_sft
-    experiment_name: "real_3cam"
+    project_name: rlinf_blockpap_neg_sft
+    experiment_name: "neg_3cam"
     logger_backends: ["wandb"]
     wandb_entity: "aaroncaozj_team"
 
@@ -30,8 +30,11 @@ runner:
   save_interval: 5000
 
 data:
-  train_data_paths: "/workspace1/zhijun/mg_dataset"   # ← 换成你的 real data 路径
-  apply_sim_bias: false         # 全真实数据训练，关闭 sim/real 对齐偏差（z+0.1m / yaw-45°）
+  train_data_paths: "/workspace1/zhijun/mg_dataset"   # ← 换成你的 neg-mix data 路径
+  num_real_episodes: 50        # 前 50 条为 positive demo，正常 SFT
+  co_training_ratio: 0.5       # 均匀采样 positive/negative（0.5 = 各占一半）
+  neg_loss_weight: -1.0        # negative demo 的 loss 权重（负号 = gradient ascent，学会规避）
+  apply_sim_bias: false         # 全真实数据（含 negative demo），关闭 sim/real 对齐偏差
 
 algorithm:
   adv_type: gae
@@ -50,7 +53,7 @@ actor:
     num_steps: 5
     add_value_head: False
     openpi:
-      config_name: "pi05_blockstack_real"
+      config_name: "pi05_blockpap_neg_3cam"
       num_images_in_input: 3
       detach_critic_input: True
       action_subsample_stride: 1
