@@ -102,7 +102,7 @@ model.openpi.action_subsample_stride: 2
 bash examples/sft/run_vla_sft.sh arc_mix_sft_openpi # mix
 bash examples/sft/run_vla_sft.sh arc_mix_sft_resume_openpi # resume
 
-bash examples/sft/run_vla_sft.sh arc_real_sft_openpi.yaml
+bash examples/sft/run_vla_sft.sh arc_real_sft_openpi
 ```
 
 仿真检验：

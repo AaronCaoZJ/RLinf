@@ -49,8 +49,8 @@ from huggingface_hub import snapshot_download
 # allow_patterns="*"
 
 # download 0323 put block on block dataset
-save_dir = "../hf_download/datasets/BlockPAP-Neg-v0"
-repo_id = "aaroncaozj/BlockPAP-Neg-v0"
+save_dir = "../hf_download/datasets/0109_sweep"
+repo_id = "aaroncaozj/0109_sweep"
 repo_type="dataset"
 allow_patterns="*"
 

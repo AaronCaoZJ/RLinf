@@ -1,0 +1,23 @@
+{
+  "output_root": "/workspace1/zhijun/mg_dataset/SweepIntoDustpan-v1_Real",
+  "fps": 20,
+  "image_height": 480,
+  "image_width": 640,
+  "chunk_size": 500,
+  "use_last": false,
+  "temp_clean_dir": "/workspace1/zhijun/_temp_cleaned_sweep",
+  "keep_temp_cleaned": false,
+  "cleaning": {
+    "gripper_threshold": 0.0005,
+    "pos_threshold": 0.0005,
+    "rot_threshold": 0.005,
+    "min_static_frames": 5,
+    "min_episode_length": 20
+  },
+  "datasets": [
+    {
+      "path": "/workspace1/zhijun/hf_download/datasets/0109_sweep",
+      "task": "sweep the green block into the dustpan"
+    }
+  ]
+}
