@@ -71,6 +71,10 @@ USE_REF_12 = False  # 运行时由 __main__ 循环覆盖（False=t0, True=t12）
 CAM_T = "og"  # 相机平移向量预设，选择 "og"、"0302" 或 "0303"，需与 RENDER_BASE_DIR 中的子目录一致
 TRAJ_ID = "0"  # 轨迹 ID，选择 0、15、25、40 或 45；设为 "random" 启用 MimicGen 生成随机模式
 RENDER_BASE_DIR = "real_franka/real2sim_env/render"
+TABLE_TEX_ID   = "006"      # 桌面纹理 ID（001-021 / "white" / "black"）；由 CLI --table-tex 覆盖
+AMBIENT_PRESET = "default"  # 环境光预设：default / warm / cool / bright / dim
+BG_PRESET      = "none"     # 背景墙预设：none / white / gray / dark / blue
+CAM_JITTER_RAD = None       # 相机随机偏转（roll, pitch, yaw）单位弧度；None = 不偏转
 
 
 def build_blockpap_states_from_env(base_env, apply_bias: bool = True):
@@ -265,7 +269,12 @@ class PickAndPlaceEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        pose_front = self._make_cam_pose(self._R,  self._t)
+        # external_cam 应用随机偏转（CAM_JITTER_RAD = [roll, pitch, yaw] 弧度）
+        R_front = self._R
+        if CAM_JITTER_RAD is not None:
+            R_jitter = Rotation.from_euler('xyz', CAM_JITTER_RAD).as_matrix()
+            R_front = self._R @ R_jitter
+        pose_front = self._make_cam_pose(R_front, self._t)
         pose_side  = self._make_cam_pose(self._R2, self._t2)
         return [
             CameraConfig("external_cam", pose_front, 640, 480,
@@ -276,7 +285,11 @@ class PickAndPlaceEnv(BaseEnv):
 
     @property
     def _default_human_render_camera_configs(self):
-        pose = self._make_cam_pose(self._R, self._t)
+        R_front = self._R
+        if CAM_JITTER_RAD is not None:
+            R_jitter = Rotation.from_euler('xyz', CAM_JITTER_RAD).as_matrix()
+            R_front = self._R @ R_jitter
+        pose = self._make_cam_pose(R_front, self._t)
         return CameraConfig("render_camera", pose, 640, 480,
                             near=0.01, far=100, intrinsic=self._K,
                             shader_pack="default")
@@ -285,10 +298,20 @@ class PickAndPlaceEnv(BaseEnv):
         # 机器人底座固定在世界原点
         super()._load_agent(options, sapien.Pose(p=[0, 0, 0]))
 
+    # 环境光预设表（RGB 强度）
+    _AMBIENT_TABLE = {
+        "default": [0.25, 0.25, 0.28],   # 原始偏冷白
+        "warm":    [0.38, 0.30, 0.18],   # 暖黄调
+        "cool":    [0.18, 0.22, 0.40],   # 冷蓝调
+        "bright":  [0.55, 0.55, 0.58],   # 明亮漫射
+        "dim":     [0.10, 0.10, 0.12],   # 昏暗低调
+    }
+
     def _load_lighting(self, options: dict):
         """写实光照：环境光 + 主方向光（含阴影）+ 补光"""
-        # 降低环境光，让阴影更立体
-        self.scene.set_ambient_light([0.25, 0.25, 0.28])
+        # 环境光：由 AMBIENT_PRESET 全局变量控制
+        ambient = self._AMBIENT_TABLE.get(AMBIENT_PRESET, self._AMBIENT_TABLE["default"])
+        self.scene.set_ambient_light(ambient)
         # 主光：右前上方，模拟自然侧光，开启阴影
         self.scene.add_directional_light(
             [0.6, 0.4, -1.0], [1.1, 1.05, 1.0],
@@ -338,13 +361,7 @@ class PickAndPlaceEnv(BaseEnv):
         self._base_pedestal = pedestal_builder.build_kinematic(name="robot_base_pedestal")
 
         # 桌面中心在机器人前方 _TABLE_CENTER_X（木质纹理 + PBR）
-        _WOOD_TEX = os.path.normpath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "rlinf", "envs", "maniskill", "assets",
-                "carrot", "more_table", "textures", "006.png",
-            )
-        )
+        # TABLE_TEX_ID：001-021 = 文件纹理；"white" = 纯白；"black" = 纯黑
         table_builder = self.scene.create_actor_builder()
         table_phys_mat = PhysxMaterial(
             static_friction=self.TABLE_STATIC_FRICTION,
@@ -353,12 +370,30 @@ class PickAndPlaceEnv(BaseEnv):
         )
         table_builder.add_box_collision(half_size=self._TABLE_HALF, material=table_phys_mat)
         table_mat = sapien.render.RenderMaterial()
-        table_mat.base_color_texture = sapien.render.RenderTexture2D(
-            filename=_WOOD_TEX, mipmap_levels=4, srgb=True
-        )
-        table_mat.roughness = 0.55
-        table_mat.metallic  = 0.0
-        table_mat.specular  = 0.5
+        if TABLE_TEX_ID == "white":
+            table_mat.base_color = [0.95, 0.95, 0.95, 1.0]
+            table_mat.roughness  = 0.25
+            table_mat.metallic   = 0.0
+            table_mat.specular   = 0.6
+        elif TABLE_TEX_ID == "black":
+            table_mat.base_color = [0.04, 0.04, 0.04, 1.0]
+            table_mat.roughness  = 0.20
+            table_mat.metallic   = 0.0
+            table_mat.specular   = 0.8
+        else:
+            _WOOD_TEX = os.path.normpath(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "..", "..", "rlinf", "envs", "maniskill", "assets",
+                    "carrot", "more_table", "textures", f"{TABLE_TEX_ID}.png",
+                )
+            )
+            table_mat.base_color_texture = sapien.render.RenderTexture2D(
+                filename=_WOOD_TEX, mipmap_levels=4, srgb=True
+            )
+            table_mat.roughness = 0.55
+            table_mat.metallic  = 0.0
+            table_mat.specular  = 0.5
         table_builder.add_box_visual(half_size=self._TABLE_HALF, material=table_mat)
         table_builder.set_initial_pose(sapien.Pose(p=[self._TABLE_CENTER_X, 0,
                                                        self.TABLE_Z - self._TABLE_HALF[2]]))
@@ -387,7 +422,7 @@ class PickAndPlaceEnv(BaseEnv):
         self.cube = cube_builder.build(name="cube")
 
         # 绿色圆形杯垫（平放）
-        # build_cylinder 默认沿 x 轴，需要绕 y 轴旋转 90 度使其“平放”在桌面上 (轴向变为 Z)
+        # build_cylinder 默认沿 x 轴，需要绕 y 轴旋转 90 度使其”平放”在桌面上 (轴向变为 Z)
         self.target = actors.build_cylinder(
             self.scene,
             radius=self.COASTER_RADIUS,
@@ -400,6 +435,29 @@ class PickAndPlaceEnv(BaseEnv):
                 q = [np.cos(np.pi/4), 0, np.sin(np.pi/4), 0]  # 绕 Y 轴旋转 90 度
             ),
         )
+
+        # 背景墙：仅视觉，BG_PRESET 全局变量控制颜色
+        _BG_COLORS = {
+            "none":  None,
+            "white": [0.95, 0.95, 0.95, 1.0],
+            "gray":  [0.55, 0.55, 0.55, 1.0],
+            "dark":  [0.12, 0.12, 0.15, 1.0],
+            "blue":  [0.18, 0.28, 0.50, 1.0],
+        }
+        bg_color = _BG_COLORS.get(BG_PRESET)
+        if bg_color is not None:
+            wall_builder = self.scene.create_actor_builder()
+            wall_mat = sapien.render.RenderMaterial()
+            wall_mat.base_color = bg_color
+            wall_mat.roughness = 0.9
+            wall_mat.metallic = 0.0
+            # 墙体：x=-0.8，宽 5m，高 3m，厚 4cm
+            wall_half = [0.02, 2.5, 1.5]
+            wall_builder.add_box_visual(half_size=wall_half, material=wall_mat)
+            wall_builder.set_initial_pose(
+                sapien.Pose(p=[-0.8, 0.0, 0.3])
+            )
+            self._bg_wall = wall_builder.build_kinematic(name="bg_wall")
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
@@ -698,9 +756,35 @@ class PickAndPlaceEnv(BaseEnv):
 
 
 if __name__ == "__main__":
+    import argparse
     import gymnasium as gym
     import imageio
     import os
+
+    # ── CLI 参数解析 ────────────────────────────────────────────────────────
+    # 必须在 gym.make 之前设置全局变量，因为 _load_scene/_load_lighting 在初始化时读取它们
+    _parser = argparse.ArgumentParser(description="BlockPAP-v1 场景预览")
+    _parser.add_argument("--table-tex", default=TABLE_TEX_ID,
+                         help="桌面纹理 ID（001-021），默认 006")
+    _parser.add_argument("--ambient", default=AMBIENT_PRESET,
+                         help="环境光预设：default/warm/cool/bright/dim")
+    _parser.add_argument("--bg", default=BG_PRESET,
+                         help="背景墙预设：none/white/gray/dark/blue")
+    _parser.add_argument("--out-dir", default=None,
+                         help="快速预览模式：只保存截图到此目录，跳过视频生成")
+    _parser.add_argument("--cam-jitter", action="store_true",
+                         help="给 external_cam 施加 ±2° 随机 roll/pitch/yaw 偏转")
+    _args = _parser.parse_args()
+
+    # 覆盖模块级全局变量（模块级赋值无需 global 声明）
+    TABLE_TEX_ID   = _args.table_tex
+    AMBIENT_PRESET = _args.ambient
+    BG_PRESET      = _args.bg
+    if _args.cam_jitter:
+        CAM_JITTER_RAD = np.random.uniform(-np.deg2rad(2), np.deg2rad(2), 3)
+        print(f"[cam jitter] roll={np.rad2deg(CAM_JITTER_RAD[0]):.2f}°  "
+              f"pitch={np.rad2deg(CAM_JITTER_RAD[1]):.2f}°  "
+              f"yaw={np.rad2deg(CAM_JITTER_RAD[2]):.2f}°")
 
     env = gym.make("BlockPAP-v1", obs_mode="rgb", render_mode="rgb_array", cam_t=CAM_T)
     obs, _ = env.reset()
@@ -735,6 +819,17 @@ if __name__ == "__main__":
         if img.max() <= 1.0:
             img = (img * 255).astype(np.uint8)
         return img
+
+    # ── 快速预览模式（--out-dir 指定时）────────────────────────────────────
+    if _args.out_dir is not None:
+        out_dir = _args.out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        frame = get_frame(obs, "external_cam")
+        imageio.imwrite(os.path.join(out_dir, "screenshot.png"), frame)
+        print(f"✅ Screenshot → {out_dir}/screenshot.png  "
+              f"[tex={TABLE_TEX_ID} amb={AMBIENT_PRESET} bg={BG_PRESET}]")
+        env.close()
+        import sys; sys.exit(0)
 
     def center_crop(img, th, tw):
         ih, iw = img.shape[:2]

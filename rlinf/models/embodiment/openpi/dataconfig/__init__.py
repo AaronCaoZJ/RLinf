@@ -327,6 +327,25 @@ _CONFIGS = [
         batch_size=16,
     ),
     TrainConfig(
+        name="pi05_blockpap_neg_3cam",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=8, discrete_state_input=False
+        ),
+        data=LeRobotFrankaEEDataConfig(
+            repo_id="BlockPAP-v0_Neg-Mix",
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_blockpap_neg_3cam/assets"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=16,
+    ),
+    TrainConfig(
         name="pi05_blockpap_mix",
         model=pi0_config.Pi0Config(
             pi05=True, action_horizon=8, discrete_state_input=False

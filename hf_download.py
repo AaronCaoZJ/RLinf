@@ -49,8 +49,8 @@ from huggingface_hub import snapshot_download
 # allow_patterns="*"
 
 # download 0323 put block on block dataset
-save_dir = "../hf_download/datasets/0323_put_block_on_block"
-repo_id = "kowyo/pick-and-place"
+save_dir = "../hf_download/datasets/BlockPAP-Neg-v0"
+repo_id = "aaroncaozj/BlockPAP-Neg-v0"
 repo_type="dataset"
 allow_patterns="*"
 

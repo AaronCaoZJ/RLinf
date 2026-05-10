@@ -363,6 +363,62 @@ class _SimYawBiasDataset:
         return sample
 
 
+class _WeightOnlyDataset(torch.utils.data.Dataset):
+    """Minimal dataset returning per-index float32 loss weight."""
+
+    def __init__(self, weights: np.ndarray):
+        self._weights = weights.astype(np.float32)
+
+    def __len__(self) -> int:
+        return len(self._weights)
+
+    def __getitem__(self, idx: int) -> float:
+        return self._weights[idx]
+
+
+class _DataLoaderWithNegWeights:
+    """Wraps an OpenPI DataLoaderImpl to inject per-sample neg-penalty loss weights.
+
+    A parallel weight-only torch DataLoader shares the *same*
+    ``_DistributedWeightedSampler`` instance.  Because
+    ``_DistributedWeightedSampler.__iter__`` re-seeds a fresh generator on
+    every call, invoking ``iter()`` on both sub-loaders inside one
+    ``__iter__`` call produces identical index sequences — the weight batch
+    at every step is therefore aligned with the obs/action batch.
+    """
+
+    def __init__(
+        self,
+        base_loader,
+        loss_weights: np.ndarray,
+        local_batch_size: int,
+        sampler: "_DistributedWeightedSampler",
+    ):
+        self._base = base_loader
+        self._sampler = sampler
+        self._weight_loader = torch.utils.data.DataLoader(
+            _WeightOnlyDataset(loss_weights),
+            batch_size=local_batch_size,
+            sampler=sampler,
+            num_workers=0,
+            drop_last=True,
+        )
+
+    def data_config(self):
+        return self._base.data_config()
+
+    @property
+    def sampler(self) -> "_DistributedWeightedSampler":
+        return self._sampler
+
+    def __iter__(self):
+        for (obs, actions), weights in zip(iter(self._base), iter(self._weight_loader)):
+            yield obs, actions, weights
+
+    def __len__(self) -> int:
+        return len(self._base)
+
+
 class FSDPVlaSftWorker(FSDPSftWorker):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
@@ -386,10 +442,13 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             num_real_episodes = getattr(self.cfg.data, "num_real_episodes", None)
             alpha = getattr(self.cfg.data, "co_training_ratio", None)
 
+            neg_loss_weight = getattr(self.cfg.data, "neg_loss_weight", 1.0)
+
             if num_real_episodes is not None and alpha is not None:
                 data_loader = self._build_weighted_openpi_loader(
                     config, num_real_episodes, float(alpha),
                     action_subsample_stride=action_subsample_stride,
+                    neg_loss_weight=float(neg_loss_weight),
                 )
             else:
                 # For non-weighted path: temporarily inflate action_horizon so the dataset
@@ -414,7 +473,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             )
 
     def _build_weighted_openpi_loader(
-        self, config, num_real_episodes: int, alpha: float, action_subsample_stride: int = 1
+        self, config, num_real_episodes: int, alpha: float, action_subsample_stride: int = 1,
+        neg_loss_weight: float = 1.0,
     ):
         """Build an OpenPI DataLoader with α-ratio weighted episode sampling.
 
@@ -516,14 +576,32 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             seed=getattr(config, "seed", 0),
             framework="pytorch",
         )
-        return DataLoaderImpl(data_config, loader)
+        base_impl = DataLoaderImpl(data_config, loader)
+
+        if neg_loss_weight != 1.0:
+            # Build per-frame loss weights: 1.0 for positive (real), neg_loss_weight for negative (sim).
+            # Using real_mask / sim_mask already computed above.
+            loss_weights = np.where(real_mask, 1.0, float(neg_loss_weight)).astype(np.float32)
+            logging.info(
+                f"[NegLossWeight] neg_loss_weight={neg_loss_weight}, "
+                f"pos_frames={n_real}, neg_frames={n_sim}"
+            )
+            return _DataLoaderWithNegWeights(base_impl, loss_weights, local_batch_size, sampler)
+
+        return base_impl
 
     def get_eval_model_output(self, batch: dict[str, Any]):
         # now the eval is not supported for embodied sft
         raise NotImplementedError("eval is not supported for embodied sft right now.")
 
     def get_train_model_output(self, batch: dict[str, Any]):
-        observation, actions = next(self.data_iter)
+        data = next(self.data_iter)
+        if len(data) == 3:
+            observation, actions, loss_weights = data
+            loss_weights = loss_weights.to(device=self.device, dtype=torch.float32)
+        else:
+            observation, actions = data
+            loss_weights = None
 
         register_pytree_dataclasses(observation)
         observation = _pytree.tree_map(
@@ -541,5 +619,15 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                 data={"observation": observation, "actions": actions},
             )
 
-        # train model return the loss
+        if loss_weights is not None:
+            # losses: (batch, action_horizon, action_dim), loss_weights: (batch,)
+            # Broadcast weight over all non-batch dims.
+            if not isinstance(losses, torch.Tensor):
+                losses = torch.stack(losses) if isinstance(losses, (list, tuple)) else \
+                    torch.tensor(losses, device=self.device, dtype=torch.float32)
+            weight = loss_weights
+            while weight.dim() < losses.dim():
+                weight = weight.unsqueeze(-1)
+            losses = losses * weight
+
         return losses

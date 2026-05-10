@@ -389,15 +389,15 @@ def main():
         "--datasets",
         nargs="+",
         default=[
-            "/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/blockpap_cleaned_real",
-            "/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/blockpap_cleaned_mimicgen",
+            "/workspace1/zhijun/mg_dataset/blockpap_cleaned_real",
+            "/workspace1/zhijun/mg_dataset/BlockPAP-Neg-v0",
         ],
         help="Paths to input datasets in order (e.g. real mimicgen1 mimicgen2)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="/workspace1/zhijun/RLinf/real_franka/real2sim_env/mg_dataset/BlockPAP-v1_Mix",
+        default="/workspace1/zhijun/mg_dataset/BlockPAP-v0_Neg-Mix",
         help="Output path for merged dataset",
     )
     parser.add_argument(
