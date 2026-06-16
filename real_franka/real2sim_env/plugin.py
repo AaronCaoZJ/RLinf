@@ -15,6 +15,13 @@ from mani_skill.utils.building.ground import build_ground
 from sapien.physx import PhysxMaterial
 
 
+# ── Replay dataset control ────────────────────────────────────────────────────
+# Set REPLAY_EPISODE_ID to an episode int before env creation to initialize the
+# robot from the corresponding HDF5 frame, enabling real-to-sim replay.
+REPLAY_EPISODE_ID = None
+DATASET_DIR = "/storage/zhijun/real_franka/pick_and_place"
+
+
 try:
     @register_agent()
     class PandaHighFriction(Panda):
@@ -79,21 +86,21 @@ class PluginEnv(BaseEnv):
     # Base thickness:  0.5 cm    →  half = 0.0025
     # Wall height above base:    2 - 0.5 = 1.5 cm → half = 0.0075
     SOCKET_OUTER_HALF = 0.04
-    SOCKET_INNER_HALF = 0.025
+    SOCKET_INNER_HALF = 0.024
     SOCKET_WALL_HALF_T = 0.0075   # (outer - inner) / 2
     SOCKET_BASE_HALF_Z = 0.0025   # base plate half-thickness (0.5 cm)
     SOCKET_WALL_HALF_Z = 0.0075   # wall half-height above base (1.5 cm)
 
-    # ── Initial positions from pick_and_place traj0 ──────────────────────────
-    # Block: traj0 block_xy
-    _BLOCK_XY  = (_TABLE_CENTER_X - 0.076, -0.15)
-    # Socket: traj0 coaster_xy
-    _SOCKET_XY = (_TABLE_CENTER_X - 0.01,   0.059)
+    # ── Initial positions from pick_and_place traj15 ─────────────────────────
+    # Block: traj15 block_xy
+    _BLOCK_XY  = (_TABLE_CENTER_X + 0.083, -0.15)
+    # Socket: traj15 coaster_xy (socket sits where the coaster was)
+    _SOCKET_XY = (_TABLE_CENTER_X + 0.0,   0.035)
 
-    # traj0 qpos_ref_0
+    # traj15 qpos_ref_0
     _QPOS_REF = [
-        0.03920901566743851, -0.6867635250091553, -0.009805346839129925,
-        -2.6944820880889893, -0.013050149194896221, 2.007251739501953, 0.8208261132240295,
+        0.04231681674718857, -0.46236130595207214, -0.018441837280988693,
+        -2.6430587768554688, -0.002512579783797264, 2.179812431335449, 0.8177617788314819,
     ]
 
     def __init__(self, *args, robot_uids="panda_high_friction", **kwargs):
@@ -137,13 +144,12 @@ class PluginEnv(BaseEnv):
         super()._load_agent(options, sapien.Pose(p=[0, 0, 0]))
 
     def _load_lighting(self, options: dict):
-        self.scene.set_ambient_light([0.25, 0.25, 0.28])
+        self.scene.set_ambient_light([0.35, 0.35, 0.35])
+        # Front light: from camera side (-X world = from screen toward scene), slight downward tilt
         self.scene.add_directional_light(
-            [0.6, 0.4, -1.0], [1.1, 1.05, 1.0],
+            [-1.0, 0.0, -0.3], [1.2, 1.15, 1.1],
             shadow=True, shadow_scale=5, shadow_map_size=4096,
         )
-        self.scene.add_directional_light([-1.0, 0.2, -0.5], [0.35, 0.38, 0.45])
-        self.scene.add_point_light([0.5, 0.0, 1.2], [1.8, 1.7, 1.6], shadow=False)
 
     # ── Scene construction ───────────────────────────────────────────────────
 
@@ -177,9 +183,17 @@ class PluginEnv(BaseEnv):
         )
         tbl_b.add_box_collision(half_size=self._TABLE_HALF, material=tbl_phys)
         tbl_mat = sapien.render.RenderMaterial()
-        tbl_mat.base_color = [0.85, 0.78, 0.65, 1.0]
-        tbl_mat.roughness = 0.6
+        _wood_tex = os.path.normpath(os.path.join(
+            os.path.dirname(__file__),
+            "..", "..", "rlinf", "envs", "maniskill", "assets",
+            "carrot", "more_table", "textures", "006.png",
+        ))
+        tbl_mat.base_color_texture = sapien.render.RenderTexture2D(
+            filename=_wood_tex, mipmap_levels=4, srgb=True
+        )
+        tbl_mat.roughness = 0.55
         tbl_mat.metallic = 0.0
+        tbl_mat.specular = 0.5
         tbl_b.add_box_visual(half_size=self._TABLE_HALF, material=tbl_mat)
         tbl_b.set_initial_pose(
             sapien.Pose(p=[self._TABLE_CENTER_X, 0, self.TABLE_Z - self._TABLE_HALF[2]])
@@ -284,24 +298,33 @@ class PluginEnv(BaseEnv):
         with torch.device(self.device):
             n = len(env_idx)
 
-            init_qpos = torch.tensor(
-                self._QPOS_REF + [0.04, 0.04], device=self.device
-            )
-            self.agent.robot.set_qpos(init_qpos.repeat(n, 1))
+            if REPLAY_EPISODE_ID is not None:
+                import h5py as _h5py
+                h5_path = os.path.join(DATASET_DIR, f"episode_{REPLAY_EPISODE_ID}.hdf5")
+                with _h5py.File(h5_path, "r") as _f:
+                    qpos0 = np.array(_f["observations/joint_pos"][0], dtype=np.float32)
+                qpos0[7:9] /= 2.0  # total-width -> per-finger
+                init_qpos = torch.tensor(qpos0, device=self.device).repeat(n, 1)
+            else:
+                init_qpos = torch.tensor(
+                    self._QPOS_REF + [0.04, 0.04], device=self.device
+                ).repeat(n, 1)
+
+            self.agent.robot.set_qpos(init_qpos)
             self.agent.robot.set_qvel(torch.zeros((n, 9), device=self.device))
 
             self._table.set_pose(
                 sapien.Pose(p=[self._TABLE_CENTER_X, 0, self.TABLE_Z - self._TABLE_HALF[2]])
             )
 
-            # Block at traj0 block position
+            # Block at traj15 block position
             blk = torch.zeros((n, 3), device=self.device)
             blk[:, 0] = self._BLOCK_XY[0]
             blk[:, 1] = self._BLOCK_XY[1]
             blk[:, 2] = self.TABLE_Z + self.BLOCK_HALF_SIZE[2]
             self.cube.set_pose(Pose.create_from_pq(p=blk))
 
-            # Socket at traj0 coaster position (kinematic, fixed)
+            # Socket at traj15 coaster position (kinematic, fixed)
             self.socket.set_pose(
                 sapien.Pose(p=[self._SOCKET_XY[0], self._SOCKET_XY[1], self.TABLE_Z])
             )
@@ -420,40 +443,161 @@ class PluginEnv(BaseEnv):
         return raw_obs, reward, terminations, truncations, infos
 
 
+def _to_uint8_frame(frame) -> np.ndarray | None:
+    if frame is None:
+        return None
+    if isinstance(frame, torch.Tensor):
+        frame = frame.detach().cpu().numpy()
+    frame = np.asarray(frame)
+    if frame.ndim == 4:
+        frame = frame[0]
+    if frame.dtype != np.uint8:
+        if frame.max() <= 1.0:
+            frame = (frame * 255).clip(0, 255).astype(np.uint8)
+        else:
+            frame = frame.clip(0, 255).astype(np.uint8)
+    return frame
+
+
+def _setup_hybrid_drives(base_env,
+                         arm_stiffness: float = 1e5,
+                         arm_damping: float = 1e3,
+                         gripper_stiffness: float = 2000.0,
+                         gripper_damping: float = 100.0,
+                         gripper_force_limit: float = 500.0):
+    for i, joint in enumerate(base_env.agent.robot.get_active_joints()):
+        if i < 7:
+            joint.set_drive_properties(arm_stiffness, arm_damping, force_limit=1e6, mode="force")
+        else:
+            joint.set_drive_properties(
+                gripper_stiffness, gripper_damping,
+                force_limit=gripper_force_limit, mode="force",
+            )
+
+
+def _hybrid_step(base_env, arm_target: np.ndarray, gripper_target: np.ndarray,
+                 sim_steps: int = 5):
+    robot = base_env.agent.robot
+    device = base_env.device
+    arm_t = torch.tensor(arm_target, device=device, dtype=torch.float32)
+    grip_t = torch.tensor(gripper_target, device=device, dtype=torch.float32)
+    all_targets = torch.cat([arm_t, grip_t]).unsqueeze(0)
+    robot.set_joint_drive_targets(all_targets, robot.get_active_joints())
+    for _ in range(sim_steps):
+        base_env.scene.step()
+    base_env.scene.update_render()
+
+
 if __name__ == "__main__":
+    import argparse
     import gymnasium as gym
+    import h5py
     import imageio
 
-    env = gym.make("Plugin-v1", obs_mode="rgb", render_mode="rgb_array")
-    obs, _ = env.reset()
-    base = env.unwrapped
+    parser = argparse.ArgumentParser(description="Plugin-v1 simulation")
+    parser.add_argument("--replay", type=int, default=15, metavar="EPISODE_ID",
+                        help="Replay a pick-and-place episode in the plugin env (default: 15)")
+    parser.add_argument("--dataset-dir", type=str, default=DATASET_DIR,
+                        help="Path to the pick-and-place HDF5 dataset directory")
+    parser.add_argument("--out", type=str, default=None,
+                        help="Output video path (default: ./render/Plugin/replay_epN.mp4)")
+    parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--sim-steps", type=int, default=5,
+                        help="Physics substeps per replay frame")
+    parser.add_argument("--demo", action="store_true",
+                        help="Run demo mode with random actions instead of replay")
+    args = parser.parse_args()
 
-    print("Sensor cameras:", list(obs["sensor_data"].keys()))
-    print(f"Table top z       : {base.TABLE_Z}")
-    print(f"Block position    : {base._BLOCK_XY}")
-    print(f"Socket position   : {base._SOCKET_XY}")
-    print(f"Socket outer      : {base.SOCKET_OUTER_HALF*2*100:.0f} cm")
-    print(f"Socket inner hole : {base.SOCKET_INNER_HALF*2*100:.0f} cm")
-    print(f"Block XY fit gap  : {(base.SOCKET_INNER_HALF - base.BLOCK_HALF_SIZE[0])*1000:.1f} mm per side")
+    if not args.demo:
+        # ── Replay mode: replay pick_and_place traj in Plugin-v1 env ──────────
+        REPLAY_EPISODE_ID = args.replay
+        DATASET_DIR = args.dataset_dir
 
-    def get_frame(o):
-        img = o["sensor_data"]["external_cam"]["rgb"]
-        if img.ndim == 4:
-            img = img[0]
-        img = img.cpu().numpy()
-        if img.max() <= 1.0:
-            img = (img * 255).astype(np.uint8)
-        return img
+        h5_path = os.path.join(DATASET_DIR, f"episode_{args.replay}.hdf5")
+        if not os.path.exists(h5_path):
+            raise FileNotFoundError(f"Episode not found: {h5_path}")
+        with h5py.File(h5_path, "r") as _f:
+            qpos_raw = _f["observations/joint_pos"][:]  # (T, 9)
+        qpos = qpos_raw.astype(np.float32)
+        qpos[:, 7:9] /= 2.0  # total-width -> per-finger
+        T = qpos.shape[0]
+        print(f"Episode {args.replay}: {T} frames")
+        print(f"Arm range:     [{qpos[:, :7].min():.4f}, {qpos[:, :7].max():.4f}]")
+        print(f"Gripper range: [{qpos[:, 7:9].min():.6f}, {qpos[:, 7:9].max():.6f}]")
 
-    frames = [get_frame(obs)]
-    for _ in range(60):
-        o, _, done, trunc, _ = env.step(env.action_space.sample())
-        frames.append(get_frame(o))
-        if done or trunc:
-            break
+        env = gym.make("Plugin-v1", obs_mode="rgb", render_mode="rgb_array")
+        obs, _ = env.reset()
+        base_env = env.unwrapped
 
-    os.makedirs("real_franka/real2sim_env/render/Plugin", exist_ok=True)
-    imageio.imwrite("real_franka/real2sim_env/render/Plugin/screenshot.png", frames[0])
-    imageio.mimsave("real_franka/real2sim_env/render/Plugin/demo.mp4", frames, fps=20)
-    print("Saved to render/Plugin/")
-    env.close()
+        print(f"Block position  : {base_env._BLOCK_XY}")
+        print(f"Socket position : {base_env._SOCKET_XY}")
+
+        _setup_hybrid_drives(base_env, arm_stiffness=1e5, arm_damping=1e3)
+
+        # Re-initialize to qpos[0] and set drive targets to avoid initial jerk
+        robot = base_env.agent.robot
+        q0 = torch.tensor(qpos[0], device=base_env.device, dtype=torch.float32).unsqueeze(0)
+        robot.set_qpos(q0)
+        robot.set_qvel(torch.zeros((1, 9), device=base_env.device))
+        robot.set_joint_drive_targets(q0, robot.get_active_joints())
+        base_env.scene.step()
+        base_env.scene.update_render()
+
+        frames = []
+        f0 = _to_uint8_frame(env.render())
+        if f0 is not None:
+            frames.append(f0)
+
+        print(f"Replaying {T} frames (sim_steps={args.sim_steps})...")
+        for t in range(T):
+            _hybrid_step(base_env, qpos[t, :7], qpos[t, 7:9], sim_steps=args.sim_steps)
+            frame = _to_uint8_frame(env.render())
+            if frame is not None:
+                frames.append(frame)
+            if base_env.evaluate()["success"][0]:
+                print(f"  SUCCESS at frame {t}")
+
+        out_path = args.out or f"./render/Plugin/replay_ep{args.replay}.mp4"
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        if frames:
+            imageio.mimsave(out_path, frames, fps=args.fps)
+            print(f"Saved {len(frames)} frames → {out_path}")
+        else:
+            print("No frames captured.")
+        env.close()
+
+    else:
+        # ── Demo mode (random actions, --demo flag) ────────────────────────────
+        env = gym.make("Plugin-v1", obs_mode="rgb", render_mode="rgb_array")
+        obs, _ = env.reset()
+        base = env.unwrapped
+
+        print("Sensor cameras:", list(obs["sensor_data"].keys()))
+        print(f"Table top z       : {base.TABLE_Z}")
+        print(f"Block position    : {base._BLOCK_XY}")
+        print(f"Socket position   : {base._SOCKET_XY}")
+        print(f"Socket outer      : {base.SOCKET_OUTER_HALF*2*100:.0f} cm")
+        print(f"Socket inner hole : {base.SOCKET_INNER_HALF*2*100:.0f} cm")
+        print(f"Block XY fit gap  : {(base.SOCKET_INNER_HALF - base.BLOCK_HALF_SIZE[0])*1000:.1f} mm per side")
+
+        def get_frame(o):
+            img = o["sensor_data"]["external_cam"]["rgb"]
+            if img.ndim == 4:
+                img = img[0]
+            img = img.cpu().numpy()
+            if img.max() <= 1.0:
+                img = (img * 255).astype(np.uint8)
+            return img
+
+        frames = [get_frame(obs)]
+        for _ in range(60):
+            o, _, done, trunc, _ = env.step(env.action_space.sample())
+            frames.append(get_frame(o))
+            if done or trunc:
+                break
+
+        os.makedirs("./render/Plugin", exist_ok=True)
+        imageio.imwrite("./render/Plugin/screenshot.png", frames[0])
+        imageio.mimsave("./render/Plugin/demo.mp4", frames, fps=20)
+        print("Saved to render/Plugin/")
+        env.close()

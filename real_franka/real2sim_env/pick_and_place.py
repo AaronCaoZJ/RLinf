@@ -308,19 +308,12 @@ class PickAndPlaceEnv(BaseEnv):
     }
 
     def _load_lighting(self, options: dict):
-        """写实光照：环境光 + 主方向光（含阴影）+ 补光"""
-        # 环境光：由 AMBIENT_PRESET 全局变量控制
-        ambient = self._AMBIENT_TABLE.get(AMBIENT_PRESET, self._AMBIENT_TABLE["default"])
-        self.scene.set_ambient_light(ambient)
-        # 主光：右前上方，模拟自然侧光，开启阴影
+        self.scene.set_ambient_light([0.35, 0.35, 0.35])
+        # Front light: from camera side (-X world), slight downward tilt
         self.scene.add_directional_light(
-            [0.6, 0.4, -1.0], [1.1, 1.05, 1.0],
-            shadow=True, shadow_scale=5, shadow_map_size=4096
+            [-1.0, 0.0, -0.3], [1.2, 1.15, 1.1],
+            shadow=True, shadow_scale=5, shadow_map_size=4096,
         )
-        # 补光：左侧柔和蓝调，减少死角
-        self.scene.add_directional_light([-1.0, 0.2, -0.5], [0.35, 0.38, 0.45])
-        # 顶部点光：模拟天花板灯
-        self.scene.add_point_light([0.5, 0.0, 1.2], [1.8, 1.7, 1.6], shadow=False)
 
     def _load_scene(self, options: dict):
         # 地面以机器人基座（世界原点）为参考：z = -0.95

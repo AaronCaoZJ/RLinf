@@ -17,11 +17,17 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 #   --type model \
 #   --path-in-repo SweepIntoDustpan-v1_Real
 
+# python hf_upload.py \
+#   --path ${CKPT_DIR}/global_step_7500/actor/model_state_dict \
+#   --repo ${REPO} \
+#   --type ${TYPE} \
+#   --path-in-repo global_step_7500/actor/model_state_dict
+
 python hf_upload.py \
-  --path ${CKPT_DIR}/global_step_2500/actor/model_state_dict \
+  --path ${CKPT_DIR}/global_step_20000/actor/model_state_dict \
   --repo ${REPO} \
   --type ${TYPE} \
-  --path-in-repo global_step_2500/actor/model_state_dict
+  --path-in-repo global_step_20000/actor/model_state_dict
 
 # python hf_upload.py \
 #   --path /workspace1/zhijun/RLinf/logs/20260326-17:46:58/real_3cam/checkpoints/global_step_5000/actor/model_state_dict \

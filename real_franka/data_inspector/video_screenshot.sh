@@ -5,12 +5,12 @@
 # BlockPAP_traj0_t0.png, BlockPAP_traj15_t0.png, BlockPAP_traj25_t0.png, BlockPAP_traj40_t0.png, BlockPAP_traj45_t0.png
 # BlockPAP_traj0_t12.png, BlockPAP_traj15_t12.png, BlockPAP_traj25_t12.png, BlockPAP_traj40_t12.png, BlockPAP_traj45_t12.png
 
-VIDEO_BASE="/workspace1/zhijun/hf_download/datasets/0324_block_pap_neg/videos"
-OUTPUT_DIR="/workspace1/zhijun/RLinf/real_franka/data_inspector/BlockPAP_ref_screenshot/new_setup"
+VIDEO_BASE="/workspace1/zhijun/hf_download/datasets/0109_sweep/videos"
+OUTPUT_DIR="/workspace1/zhijun/RLinf/real_franka/data_inspector/Sweep_ref_screenshot/"
 
 mkdir -p "$OUTPUT_DIR"
 
-for traj in 12 13 14 15 16; do
+for traj in 0; do
     VIDEO="${VIDEO_BASE}/${traj}/1.mp4"
 
     # t=0: 初始化时刻
