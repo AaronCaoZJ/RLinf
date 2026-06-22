@@ -26,7 +26,7 @@ State / action convention (must match training in mg_generate_blockpap_data.py):
 
 Usage example:
     cd /workspace1/zhijun/RLinf
-    python toolkits/eval_scripts_openpi/blockpap_real_eval.py \\
+    python real_franka_eval.py \\
         --config_name pi05_blockpap_mix \\
         --pretrained_path logs/20260311-12:27:57/test_data_alpha_ratio/checkpoints/global_step_4000/actor/model_state_dict/full_weights.pt \\
         --nuc_ip 192.168.1.143 \\
@@ -335,7 +335,7 @@ class CameraDisplay:
         python /home/showlab/Users/zhijun/openpi/examples/lab/camera_viewer.py
     """
 
-    FRAME_DIR  = "/home/showlab/Users/zhijun/eval/real_eval/tmp"
+    FRAME_DIR  = "/home/showlab/Users/zhijun/experiments/real_eval/tmp"
     FRAME_FILE = os.path.join(FRAME_DIR, "combined_frame.npy")
     STEP_FILE  = os.path.join(FRAME_DIR, "step.txt")
     INFO_FILE  = os.path.join(FRAME_DIR, "info.txt")
@@ -957,7 +957,7 @@ if __name__ == "__main__":
     )
 
     # ── Logging ──
-    parser.add_argument("--log_dir", type=str, default="/home/showlab/Users/zhijun/eval/real_eval")
+    parser.add_argument("--log_dir", type=str, default="/home/showlab/Users/zhijun/experiments/real_eval")
     parser.add_argument("--exp_name", type=str, default="blockpap_real_eval")
 
     # ── Policy ──
