@@ -19,7 +19,7 @@ cd /home/showlab/Users/zhijun/RLinf
 #     --external_camera_serial 123456789 \
 #     --num_episodes 5 --action_chunk 8 --use_mock_robot --use_mock_camera
 
-python toolkits/eval_scripts_openpi/real_franka_eval.py \
+python real_franka_eval.py \
     --config_name pi05_blockpap_mix \
     --pretrained_path /home/showlab/Users/zhijun/my_ckpt/models/pi05_aligned_co-sft_blockpap/stride2_global_step_15000/actor/model_state_dict/full_weights.pt \
     --nuc_ip 192.168.1.112 \
