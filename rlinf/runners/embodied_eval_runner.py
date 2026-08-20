@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 import typing
 
 from rlinf.scheduler import Channel
@@ -19,7 +20,7 @@ from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.logging import get_logger
 from rlinf.utils.metric_logger import MetricLogger
-from rlinf.utils.metric_utils import compute_evaluate_metrics
+from rlinf.utils.metric_utils import compute_evaluate_metrics, print_metrics_table
 
 if typing.TYPE_CHECKING:
     from omegaconf.dictconfig import DictConfig
@@ -53,28 +54,54 @@ class EmbodiedEvalRunner:
         self.logger = get_logger()
 
     def init_workers(self):
-        self.rollout.init_worker().wait()
-        self.env.init_worker().wait()
+        rollout_handle = self.rollout.init_worker()
+        env_handle = self.env.init_worker()
+
+        rollout_handle.wait()
+        env_handle.wait()
 
     def evaluate(self):
+        # Channel direction convention (names follow the receiver, not the sender):
+        #   rollout_channel: env -> rollout  (env sends obs/RTC requests, rollout receives)
+        #   env_channel:     rollout -> env  (rollout sends actions/RTC responses, env receives)
         env_handle: Handle = self.env.evaluate(
+            input_channel=self.env_channel,
+            rollout_channel=self.rollout_channel,
+        )
+        rollout_handle: Handle = self.rollout.evaluate(
             input_channel=self.rollout_channel,
             output_channel=self.env_channel,
         )
-        rollout_handle: Handle = self.rollout.evaluate(
-            input_channel=self.env_channel,
-            output_channel=self.rollout_channel,
-        )
+
         env_results = env_handle.wait()
-        rollout_handle.wait()
-        eval_metrics_list = [results for results in env_results if results is not None]
-        eval_metrics = compute_evaluate_metrics(eval_metrics_list)
+        env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        if not env_decoupled_mode:
+            rollout_results = rollout_handle.wait()
+            rollout_metrics_list = [
+                results for results in rollout_results if results is not None
+            ]
+            rollout_metrics = compute_evaluate_metrics(rollout_metrics_list)
+            rollout_metrics.pop("num_trajectories", None)
+        else:
+            rollout_metrics = {}
+
+        env_metrics_list = [results for results in env_results if results is not None]
+        eval_metrics = compute_evaluate_metrics(env_metrics_list)
+        eval_metrics.update(rollout_metrics)
         return eval_metrics
 
     def run(self):
+        start_time = time.time()
         eval_metrics = self.evaluate()
         eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
         self.logger.info(eval_metrics)
         self.metric_logger.log(step=0, data=eval_metrics)
+        print_metrics_table(
+            step=0,
+            total_steps=1,
+            start_time=start_time,
+            metrics=eval_metrics,
+            log_path=self.metric_logger.log_path,
+        )
 
         self.metric_logger.finish()

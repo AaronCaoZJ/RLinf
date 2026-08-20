@@ -15,24 +15,56 @@
 import os
 from typing import Any, Optional, Union
 
-import imageio
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-try:
-    import tensorflow as tf
-except ImportError:  # pragma: no cover
-    tf = None
+_tf = None
+
+
+def _get_tensorflow():
+    global _tf
+    if _tf is None:
+        try:
+            import tensorflow as tf
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("tensorflow is required for crop_and_resize") from exc
+        _tf = tf
+    return _tf
+
+
+def get_env_attr(env, name: str, default: Any = None) -> Any:
+    """Fetch an attribute from a (possibly wrapped) gym/gymnasium env.
+
+    Walks the wrapper stack so the attribute is found even when ``env`` is
+    nested, e.g. ``CollectEpisode(RecordVideo(base_env))``. This stays
+    compatible across versions: gymnasium >= 1.0 exposes ``get_wrapper_attr``
+    while older gymnasium/gym and custom wrappers rely on ``__getattr__``
+    delegation through plain ``getattr``.
+
+    Args:
+        env: The (possibly wrapped) environment.
+        name: The attribute name to look up.
+        default: Value returned when the attribute is not present.
+
+    Returns:
+        The resolved attribute, or ``default`` if it cannot be found.
+    """
+    if hasattr(env, "get_wrapper_attr"):
+        try:
+            return env.get_wrapper_attr(name)
+        except AttributeError:
+            return default
+    return getattr(env, name, default)
 
 
 def to_tensor(
     array: Union[dict, torch.Tensor, np.ndarray, list, Any], device: str = "cpu"
-) -> Union[dict, torch.Tensor]:
+) -> Union[dict, torch.Tensor, list, None]:
     """
     Copied from ManiSkill!
     Maps any given sequence to a torch tensor on the CPU/GPU. If physx gpu is not enabled then we use CPU, otherwise GPU, unless specified
-    by the device argument
+    by the device argument. Also handles None inputs (or lists/arrays containing None) by returning None or a list of None/Tensors.
 
     Args:
         array: The data to map to a tensor
@@ -40,23 +72,37 @@ def to_tensor(
             and CPU otherwise
 
     """
-    if isinstance(array, (dict)):
+    if array is None:
+        return None
+
+    if isinstance(array, dict):
         return {k: to_tensor(v, device=device) for k, v in array.items()}
     elif isinstance(array, torch.Tensor):
         ret = array.to(device)
     elif isinstance(array, np.ndarray):
+        if array.dtype == object:
+            return [to_tensor(x, device=device) for x in array]
+
         if array.dtype == np.uint16:
             array = array.astype(np.int32)
         elif array.dtype == np.uint32:
             array = array.astype(np.int64)
         ret = torch.tensor(array).to(device)
     else:
-        if isinstance(array, list) and isinstance(array[0], np.ndarray):
-            ret = torch.tensor(np.array(array), device=device)
-        elif isinstance(array, list) and isinstance(array[0], torch.Tensor):
-            ret = torch.stack(array).to(device)
-        else:
-            ret = torch.tensor(array, device=device)
+        if isinstance(array, list) and any(x is None for x in array):
+            return [to_tensor(x, device=device) for x in array]
+
+        if (
+            isinstance(array, list)
+            and len(array) > 0
+            and isinstance(array[0], np.ndarray)
+        ):
+            array = np.array(array)
+            if array.dtype == object:
+                return [to_tensor(x, device=device) for x in array]
+
+        ret = torch.tensor(array, device=device)
+
     if ret.dtype == torch.float64:
         ret = ret.to(torch.float32)
     return ret
@@ -112,6 +158,13 @@ def save_rollout_video(
     """
     os.makedirs(output_dir, exist_ok=True)
     mp4_path = os.path.join(output_dir, f"{video_name}.mp4")
+    try:
+        import imageio
+    except ImportError as exc:
+        raise ImportError(
+            "imageio is required to save rollout videos; install rlinf[embodied]."
+        ) from exc
+
     video_writer = imageio.get_writer(mp4_path, fps=fps)
     for img in rollout_images:
         video_writer.append_data(img)
@@ -259,8 +312,8 @@ def crop_and_resize(image, crop_scale, batch_size):
     to original size. We use the same logic seen in the `dlimp` RLDS datasets wrapper to avoid
     distribution shift at test time.
     """
-    if tf is None:
-        raise ImportError("tensorflow is required for crop_and_resize")
+    tf = _get_tensorflow()
+
     assert image.shape.ndims == 3 or image.shape.ndims == 4
     expanded_dims = False
     if image.shape.ndims == 3:
@@ -297,8 +350,8 @@ def crop_and_resize(image, crop_scale, batch_size):
 
 
 def center_crop_image(image):
-    if tf is None:
-        raise ImportError("tensorflow is required for crop_and_resize")
+    tf = _get_tensorflow()
+
     batch_size = 1
     crop_scale = 0.9
 

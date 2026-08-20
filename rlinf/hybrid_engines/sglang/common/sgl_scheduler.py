@@ -14,7 +14,7 @@
 
 import logging
 from importlib.metadata import version
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import torch
 from omegaconf import DictConfig
@@ -30,7 +30,10 @@ from sglang.srt.managers.scheduler import (
 )
 
 from rlinf.scheduler import Worker, WorkerAddress
-from rlinf.utils.placement import ModelParallelComponentPlacement, PlacementMode
+from rlinf.utils.placement import (
+    ModelParallelComponentPlacement,
+    RolloutSyncMode,
+)
 from rlinf.workers.rollout.utils import (
     RankMapper,
 )
@@ -60,13 +63,17 @@ class Scheduler(_Scheduler):
         if not hasattr(self.tp_worker, "worker"):
             self.tp_worker.worker = self.tp_worker
 
-        self._request_dispatcher._mapping.extend(
-            [
-                (TaskMethodInput, self.run_task_method),
-                (SyncHFWeightInput, self.sync_hf_weight),
-                (AbortGenerationInput, self.abort_generation),
-            ]
-        )
+        # In sglang 0.4.x `_mapping` was a list; in 0.5.x it's an OrderedDict
+        _extra_req_mapping = [
+            (TaskMethodInput, self.run_task_method),
+            (SyncHFWeightInput, self.sync_hf_weight),
+            (AbortGenerationInput, self.abort_generation),
+        ]
+        if isinstance(self._request_dispatcher._mapping, dict):
+            for _ty, _fn in _extra_req_mapping:
+                self._request_dispatcher._mapping[_ty] = _fn
+        else:
+            self._request_dispatcher._mapping.extend(_extra_req_mapping)
 
         self.is_weight_offloaded = False
         self.weight_norm_dict = None
@@ -106,14 +113,53 @@ class Scheduler(_Scheduler):
 
         return result
 
+    @staticmethod
+    def _hf_to_sglang_name(model) -> Callable[[str], str]:
+        """Build a renamer from HuggingFace parameter names to sglang's.
+
+        transformers 5 nests a multimodal model's submodules under the wrapper --
+        ``model.visual.*`` and ``model.language_model.*`` -- where transformers 4
+        and sglang keep ``visual.*`` and ``model.*``. Feeding the new names to
+        sglang's ``load_weights`` fails deep inside it: its stacked-params mapping
+        rewrites ``gate_proj`` to ``gate_up_proj`` first, so the error surfaces as
+        ``KeyError: model.visual.blocks.0.mlp.gate_up_proj.weight`` for a
+        parameter that does exist, just one prefix over.
+
+        The rename is decided from the loaded sglang model, so a version whose
+        tree already matches the sender is left alone.
+
+        Args:
+            model: The sglang model to load weights into.
+
+        Returns:
+            A function mapping one HF parameter name to sglang's name for it.
+        """
+        param_names = dict(model.named_parameters()).keys()
+        renames = []
+        if any(name.startswith("visual.") for name in param_names):
+            renames.append(("model.visual.", "visual."))
+        if any(name.startswith("model.layers.") for name in param_names):
+            renames.append(("model.language_model.", "model."))
+
+        def rename(name: str) -> str:
+            for src, dst in renames:
+                if name.startswith(src):
+                    return dst + name[len(src) :]
+            return name
+
+        return rename
+
     def batch_load_hf_weight(self, state_dict: dict[str, Any]) -> Any:
         assert self.weight_reload == "sync", (
             "only sglang with 'sync' can run 'batch_load_hf_weight'"
         )
         model = self.tp_worker.worker.model_runner.model
-        colocate = self.placement_mode == PlacementMode.COLLOCATED
+        rename = self._hf_to_sglang_name(model)
+        rollout_sync_mode_collocated = (
+            self.rollout_sync_mode == RolloutSyncMode.COLLOCATED
+        )
         batch_weight = []
-        if colocate:
+        if rollout_sync_mode_collocated:
             for name, handle in state_dict.items():
                 func, args = handle
                 list_args = list(args)
@@ -121,11 +167,11 @@ class Scheduler(_Scheduler):
                 # in case two processes have different CUDA_VISIBLE_DEVICES
                 list_args[6] = torch.cuda.current_device()
                 new_weight = func(*list_args)
-                batch_weight.append((name, new_weight))
+                batch_weight.append((rename(name), new_weight))
         else:
             # disaggregate mode, recv tensor directly
             for name, tensor in state_dict.items():
-                batch_weight.append((name, tensor))
+                batch_weight.append((rename(name), tensor))
 
         model.load_weights(batch_weight)
 
@@ -240,6 +286,7 @@ class Scheduler(_Scheduler):
             self.cfg = config
             self._actor_group_name = self.cfg.actor.group_name
             self.placement_mode = placement.placement_mode
+            self.rollout_sync_mode = placement._rollout_sync_mode
             self.actor_weight_rank = RankMapper.get_rollout_rank_to_actor_rank_map(
                 placement
             )[(self._rlinf_worker.get_parent_rank(), self._rlinf_worker._rank)]
@@ -253,7 +300,14 @@ class Scheduler(_Scheduler):
                 if hasattr(module, "use_presharded_weights"):
                     module.use_presharded_weights = use_presharded_weights
 
-            if self.cfg.rollout.get("validate_weight_first_sync", False):
+            validate_weight_first_sync = self.cfg.rollout.get(
+                "validate_weight_first_sync", False
+            )
+            if self.cfg.runner.resume_dir is not None:
+                # validate_weight_first_sync compare hf weights with megatron weights,
+                # and if resume_dir is enabled, hf weights can't equal to megatron's.
+                validate_weight_first_sync = False
+            if validate_weight_first_sync:
                 self.weight_norm_dict = validate_weight_init(model)
 
             self._rlinf_worker.log_info(
@@ -300,16 +354,16 @@ class Scheduler(_Scheduler):
         return_logprob: bool,
         skip_req=None,
     ):
+        # for sglang 0.5.0 and later, we use the original _handle_batch_output
+        if not self.patch_return_output_ids:
+            return super().stream_output_generation(reqs, return_logprob, skip_req)
+
         from sglang.srt.managers.scheduler_output_processor_mixin import (
             DEFAULT_FORCE_STREAM_INTERVAL,
             BaseFinishReason,
             BatchTokenIDOut,
             DisaggregationMode,
         )
-
-        # for sglang 0.5.0 and later, we use the original _handle_batch_output
-        if not self.patch_return_output_ids:
-            return super().stream_output_generation(reqs, return_logprob, skip_req)
 
         rids = []
         finished_reasons: list[BaseFinishReason] = []

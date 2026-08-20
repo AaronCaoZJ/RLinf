@@ -217,6 +217,12 @@ def preprocess_reasoning_advantages_inputs(
     elif kwargs["adv_type"] == "reinpp":
         kwargs.update({"rewards": rewards.unsqueeze(0)})
 
+    elif kwargs["adv_type"] == "raw":
+        kwargs.update({"rewards": rewards})
+
+    else:
+        assert False, f"Unsupported adv_type {kwargs['adv_type']}"
+
     if values is not None:  # [bsz, seq_len]
         assert values.ndim == 2, f"Unsupported values shape {values.shape}"
         values = values.transpose(0, 1)  # [seq_len, bsz]
@@ -262,9 +268,11 @@ def postprocess_reasoning_advantages_outputs(
     Post-process results for Reasoning tasks; transpose tensors back.
     """
 
-    advantages = advantages.transpose(0, 1)  # [bsz, seq_len]
+    # remember to call contiguous() to ensure correctness when being
+    # transmitted through channels
+    advantages = advantages.transpose(0, 1).contiguous()  # [bsz, seq_len]
     if returns is not None:
-        returns = returns.transpose(0, 1)  # [bsz, seq_len]
+        returns = returns.transpose(0, 1).contiguous()  # [bsz, seq_len]
 
     return advantages, returns
 
@@ -307,7 +315,13 @@ def preprocess_loss_inputs(
             proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim)
         if versions is not None:
             versions = versions.reshape(bsz, -1, single_action_dim)
-        advantages = advantages.unsqueeze(-1)
+        if kwargs.get("loss_type") == "opd":
+            assert advantages.shape == logprobs.shape, (
+                f"OPD advantages shape {advantages.shape} must match "
+                f"logprobs shape {logprobs.shape}."
+            )
+        else:
+            advantages = advantages.unsqueeze(-1)
         if loss_mask is not None:
             loss_mask = loss_mask.unsqueeze(-1)
         if loss_mask_sum is not None:

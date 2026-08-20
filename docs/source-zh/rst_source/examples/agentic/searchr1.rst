@@ -1,23 +1,46 @@
 Search-R1的强化学习训练
-=======================
+========================================
 
-结合工具调用的Multi-turn
-RL被证明能够将大语言模型（LLM）的交互边界扩展到真实世界。本文档介绍了如何在
-RLinf 框架下复现论文\ `Search-R1: Training LLMs to Reason and Leverage
-Search Engines with Reinforcement
-Learning <https://arxiv.org/abs/2503.09516>`__\ 中的实验，使用强化学习（RL）来训练大语言模型（LLM）通过调用搜索工具回答问题。
+使用本配方复现 `Search-R1: Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning <https://arxiv.org/abs/2503.09516>`__ 的搜索增强推理实验，通过强化学习训练大语言模型调用搜索工具回答问题。
+
+概述
+----------------------------------------
+
+使用本配方结合本地 wiki 检索服务训练搜索增强推理模型。
+
+.. grid:: 2 4 4 4
+   :gutter: 2
+
+   .. grid-item-card:: 模型
+      :text-align: center
+
+      Qwen2.5-3B-Instruct
+
+   .. grid-item-card:: 算法
+      :text-align: center
+
+      带搜索工具调用的多轮强化学习
+
+   .. grid-item-card:: 工具
+      :text-align: center
+
+      FAISS 或 Qdrant 本地 wiki server
+
+   .. grid-item-card:: 硬件
+      :text-align: center
+
+      参考运行使用 8×H100
 
 环境
-----
+----------------------------------------
 
 RLinf环境
-~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-RLinf 环境配置参照 `RLinf
-Installation <https://rlinf.readthedocs.io/en/latest/rst_source/start/installation.html>`__
+RLinf 环境配置参照 :doc:`RLinf Installation </rst_source/start/installation>`。
 
 Local Wiki Server运行环境
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 我们使用search-R1示例中的local retrieve
 server，通过conda安装faiss，详细文档见\ `SearchR1 <https://raw.githubusercontent.com/PeterGriffinJin/Search-R1/refs/heads/main/docs/retriever.md>`__\ ，安装过程参考\ `Search-R1 &
@@ -37,7 +60,7 @@ veRL-SGLang <https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main
    pip install uvicorn fastapi
 
 Wiki配置文件
-~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 我们使用Asearcher提供的本地检索文件，下载文件大约 50~60GB
 
@@ -46,15 +69,15 @@ Wiki配置文件
    conda activate retriever
 
    save_path=/the/path/to/save
-   python examples/searchr1/download.py --save_path $save_path
+   python examples/agent/searchr1/download.py --save_path $save_path
 
-从huggingface上下载\ `flat e5 <https://huggingface.co/intfloat/e5-base-v2>`__ embedding模型，并生成index
+从huggingface上下载\ `e5-base-v2 <https://huggingface.co/intfloat/e5-base-v2>`__ embedding模型，并生成index
 
 .. code-block:: bash
 
-   bash examples/searchr1/local_server_faiss/build_index.sh
+   bash examples/agent/tools/search_local_server_faiss/build_index.sh
 
-将之前下载好的wiki文件路径和index路径等写入examples/searchr1/launch_local_server.sh
+将之前下载好的wiki文件路径和index路径等写入examples/agent/searchr1/launch_local_server.sh
 
 .. code-block:: bash
 
@@ -81,48 +104,58 @@ Wiki配置文件
 运行launch_local_server.sh启动Local Wiki Server，等待直至输出server ip等信息，代表server启动完成
 
 (Optional) 使用Qdrant作为Wiki Server
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 我们也支持使用 qdrant 作为 wiki 服务器。如果你不打算使用 qdrant，可以直接跳到 训练 部分。
 
-使用上一部分中提到的方式准备Asearcher提供的本地wiki corpus检索文件。
+使用上一部分中提到的方式准备 Asearcher 提供的本地 wiki corpus 检索文件。
 
-从huggingface上下载\ `Qwen2.5-3B-Instruct <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct>`__ embedding模型。
+从 huggingface 上下载\ `e5-base-v2 <https://huggingface.co/intfloat/e5-base-v2>`__ embedding 模型。
 
-下载 `qdrant <https://github.com/qdrant/qdrant/releases>`__ 并按照以下步骤构建 qdrant collection。首先，创建一个文件夹并把下载好的qdrant二进制文件放入该文件夹中，方便后续存储qdrant程序及其构建的collection文件。
+下载 `qdrant <https://github.com/qdrant/qdrant/releases>`__ 并按照以下步骤构建 qdrant collection。首先，创建一个文件夹并把下载好的 qdrant 二进制文件放入该文件夹中，方便后续存储 qdrant 程序及其构建的 collection 文件。
 
-在 `examples/searchr1/local_server_qdrant/build_index_qdrant.sh` 和 `examples/searchr1/local_server_qdrant/launch_local_server_qdrant.sh` 中，根据之前下载的 wiki corpus, Qwen2.5-3B-Instruct 和 qdrant路径更新 `WIKI2018_DIR`、 `retriever_path` 和 `qdrant_path` 的文件路径。
+在 `examples/agent/tools/search_local_server_qdrant/build_index_qdrant.sh` 和 `examples/agent/tools/search_local_server_qdrant/launch_local_server_qdrant.sh` 中，根据之前下载的 wiki corpus, e5-base-v2 和 qdrant 路径更新 `WIKI2018_DIR`、 `retriever_path` 和 `qdrant_path` 的文件路径。
 
-使用以下指令构建 qdrant wiki 服务器的collection：
+使用以下指令构建 qdrant wiki 服务器的 collection：
 
 .. code-block:: bash
+
+   # 创建 qdrant 存放的文件夹
+   mkdir -p /path/to/qdrant
+   # 拷贝二进制执行文件
+   cp qdrant /path/to/qdrant
+
+   # 启动 qdrant server
+   /path/to/qdrant/qdrant &
 
    # 构建 qdrant collection
-   bash ./examples/searchr1/local_server_qdrant/build_index_qdrant.sh
+   bash examples/agent/tools/search_local_server_qdrant/build_index_qdrant.sh
 
-运行launch_local_server_qdrant.sh启动Local Qdrant Wiki Server，等待直至输出server ip等信息，代表server启动完成
+运行 launch_local_server_qdrant.sh 启动 Local Qdrant Wiki Server ，等待直至输出 server ip 等信息，代表 server 启动完成
 
 .. code-block:: bash
-   
+
    # 启动 qdrant server
-   bash ./examples/searchr1/local_server_qdrant/launch_local_server_qdrant.sh
+   /path/to/qdrant/qdrant &
+
+   # 启动基于 qdrant 的 wiki server
+   bash examples/agent/tools/search_local_server_qdrant/launch_local_server_qdrant.sh
 
 Qdrant 默认使用 HNSW 图索引算法。关于 HNSW 图索引的优化,请参考 `Qdrant 文档 <https://qdrant.tech/documentation/guides/optimize/>`__。
 
 在8*H100上训练
---------------
+----------------------------------------
 
 从huggingface上下载\ `训练集 <https://huggingface.co/datasets/RLinf/Search-R1-Data>`__
-，并将路径写入examples/searchr1/config/qwen2.5-3b-tool-1node.yaml
+，并将路径写入 `examples/agent/searchr1/config/train_qwen2.5.yaml`:
 
 .. code-block:: yaml
 
    data:
      ……
      train_data_paths: ["/path/to/train.jsonl"]
-     val_data_paths: ["/path/to/train.jsonl"]
 
-修改examples/searchr1/config/qwen2.5-3b-tool-1node.yaml中rollout.model.model_path的路径
+修改 `train_qwen2.5.yaml` 中 `rollout.model.model_path` 的路径
 
 .. code-block:: yaml
 
@@ -134,7 +167,7 @@ Qdrant 默认使用 HNSW 图索引算法。关于 HNSW 图索引的优化,请参
        model_path: /path/to/model/Qwen2.5-3B-Instruct
        model_type: qwen2.5
 
-如果使用sampling_params.stop来控制模型停止节省训练时间，detokenize应当设置为True
+如果使用 `sampling_params.stop` 来控制模型停止节省训练时间，detokenize应当设置为True
 
 .. code-block:: yaml
 
@@ -142,9 +175,9 @@ Qdrant 默认使用 HNSW 图索引算法。关于 HNSW 图索引的优化,请参
       ……
       distributed_executor_backend: mp   # ray or mp
       disable_log_stats: False
-      detokenize: True  
+      detokenize: True
 
-由于search-R1会re-tokenize模型输出，recompute_logprobs应当设置为True
+由于 Search-R1 会re-tokenize模型输出， `recompute_logprobs` 应当设置为True
 
 .. code-block:: yaml
 
@@ -153,10 +186,10 @@ Qdrant 默认使用 HNSW 图索引算法。关于 HNSW 图索引的优化,请参
       recompute_logprobs: True
       shuffle_rollout: False
 
-运行examples/searchr1/run_main_searchr1_single.sh启动训练。
+运行 `bash examples/agent/searchr1/run_train.sh` 启动训练。
 
-测试
-----
+评测
+----------------------------------------
 
 运行以下命令将 Megatron checkpoint 转换为 HuggingFace model
 
@@ -187,7 +220,7 @@ Qdrant 默认使用 HNSW 图索引算法。关于 HNSW 图索引的优化,请参
    cp "${CKPT_PATH_ORIGINAL_HF}"/!(*model.safetensors.index.json) "${CKPT_PATH_HF}"
 
 将转换得到的huggingface
-model路径填入examples/searchr1/config/qwen2.5-3b-tool-1node-eval.yaml
+model路径填入 `examples/agent/searchr1/config/eval_qwen2.5.yaml`
 
 .. code-block:: yaml
 
@@ -205,13 +238,12 @@ model路径填入examples/searchr1/config/qwen2.5-3b-tool-1node-eval.yaml
 
    data:
      ……
-     train_data_paths: ["/path/to/eval.jsonl"]
      val_data_paths: ["/path/to/eval.jsonl"]
 
-运行examples/searchr1/run_main_searchr1_single_eval.sh启动测试。
+运行 `bash examples/agent/searchr1/run_eval.sh` 启动测试。
 
-训练曲线
---------
+可视化与结果
+----------------------------------------
 
 下面展示 reward 曲线和训练时间曲线。
 
@@ -219,7 +251,7 @@ model路径填入examples/searchr1/config/qwen2.5-3b-tool-1node-eval.yaml
 
    <div style="display: flex; justify-content: space-between; gap: 10px;">
      <div style="flex: 1; text-align: center;">
-       <img src="https://github.com/RLinf/misc/raw/main/pic/searchr1.png" style="width: 100%;"/>
+       <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/searchr1.png" style="width: 100%;"/>
        <p><em>Qwen2.5-3B-Instruct in RLinf</em></p>
      </div>
    </div>
@@ -230,7 +262,7 @@ model路径填入examples/searchr1/config/qwen2.5-3b-tool-1node-eval.yaml
 
    <div style="display: flex; justify-content: space-between; gap: 10px;">
      <div style="flex: 1; text-align: center;">
-       <img src="https://github.com/RLinf/misc/raw/main/pic/searchr1_orig_impl_time.png" style="width: 35%;"/>
+       <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/searchr1_orig_impl_time.png" style="width: 35%;"/>
        <p><em>Qwen2.5-3B-Instruct in original implementation at PeterGriffinJin/Search-R1</em></p>
      </div>
    </div>

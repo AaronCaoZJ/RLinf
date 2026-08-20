@@ -1,24 +1,52 @@
 rStar2的强化学习训练
-=======================
+========================================
 
-结合工具调用的 Multi-turn RL 被证明能够将大语言模型（LLM）的交互边界扩展到真实世界。本文档介绍了如何在 RLinf 框架下复现论文 `rStar2-Agent: Agentic Reasoning Technical Report <https://arxiv.org/abs/2508.20722>`__ 的实验，使用强化学习（RL）来训练大语言模型（LLM）通过调用代码运行工具回答问题。
+使用本配方复现 `rStar2-Agent: Agentic Reasoning Technical Report <https://arxiv.org/abs/2508.20722>`__ 的多轮工具调用实验，通过强化学习训练大语言模型调用代码运行工具回答问题。
+
+概述
+----------------------------------------
+
+使用本配方复现 rStar2 风格的智能体推理，包含代码执行工具与 Megatron 训练。
+
+.. grid:: 2 4 4 4
+   :gutter: 2
+
+   .. grid-item-card:: 模型
+      :text-align: center
+
+      Qwen2.5-7B-Instruct
+
+   .. grid-item-card:: 算法
+      :text-align: center
+
+      带工具调用的多轮强化学习
+
+   .. grid-item-card:: 工具
+      :text-align: center
+
+      Code Judge server 与 Math-Verify reward
+
+   .. grid-item-card:: 硬件
+      :text-align: center
+
+      参考运行使用 8×H100
 
 环境
-----
+----------------------------------------
 
 RLinf环境
-~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-RLinf 环境配置参照 `RLinf Installation <https://rlinf.readthedocs.io/en/latest/rst_source/start/installation.html>`__
+RLinf 环境配置参照 :doc:`RLinf Installation </rst_source/start/installation>`。
 
 Code judge运行环境
-~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 我们使用 rStar2 示例中的 code judge 工具，安装过程参考 `rStar2 & veRL-SGLang <https://github.com/volcengine/verl/blob/c12e3cbce8dceb70e9c9b16252bfd5675ec3129c/recipe/rstar2_agent/README.md>`__
 
 .. code-block:: bash
 
-   cd examples/rstar2
+   cd examples/agent/rstar2
 
    # install code judge
    sudo apt-get update -y && sudo apt-get install redis -y
@@ -29,10 +57,10 @@ Code judge运行环境
    # install rstar2_agent requirements
    pip install -r requirements.txt
 
-   cd ../..
+   cd code-judge
 
 Code Judge 服务器设置
-^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 rStar2-Agent 使用 Code Judge 作为工具调用服务器来执行模型生成的 Python 代码。
 
@@ -52,7 +80,7 @@ rStar2-Agent 使用 Code Judge 作为工具调用服务器来执行模型生成�
    # Replace $WORKSPACE and $MASTER_ADDR with your actual paths
 
    tmux new-session -d -s server \
-   'cd $WORKSPACE/examples/rstar2/code-judge && \
+   'cd $WORKSPACE/examples/agent/rstar2/code-judge && \
       MAX_EXECUTION_TIME=4 \
       REDIS_URI="redis://$MASTER_ADDR:6379" \
       RUN_WORKERS=0 \
@@ -67,7 +95,7 @@ rStar2-Agent 使用 Code Judge 作为工具调用服务器来执行模型生成�
    # Adjust MAX_WORKERS based on your CPU count per node
 
    tmux new-session -d -s worker \
-   'cd $WORKSPACE/examples/rstar2/code-judge && \
+   'cd $WORKSPACE/examples/agent/rstar2/code-judge && \
       MAX_EXECUTION_TIME=4 \
       REDIS_URI="redis://$MASTER_ADDR:6379" \
       MAX_WORKERS=64 \
@@ -76,7 +104,7 @@ rStar2-Agent 使用 Code Judge 作为工具调用服务器来执行模型生成�
 
 
 Reward计算工具
-~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 我们使用 Math-Verify 辅助进行 reward 计算，需通过 pip 安装
 
@@ -92,9 +120,9 @@ Reward计算工具
    pip install pylatexenc
 
 在8*H100上训练
---------------
+----------------------------------------
 
-通过 ``examples/rstar2/data_process/process_train_dataset.py`` 下载训练集，并将路径写入 ``examples/rstar2/config/rstar2-qwen2.5-7b-megatron.yaml``
+通过 ``examples/agent/rstar2/data_process/process_train_dataset.py`` 下载训练集，并将路径写入 ``examples/agent/rstar2/config/rstar2-qwen2.5-7b-megatron.yaml``
 
 .. code-block:: yaml
 
@@ -103,7 +131,7 @@ Reward计算工具
      train_data_paths: ["/path/to/train.jsonl"]
      val_data_paths: ["/path/to/train.jsonl"]
 
-修改 ``examples/rstar2/config/rstar2-qwen2.5-7b-megatron.yaml`` 中 ``rollout.model.model_path`` 的路径
+修改 ``examples/agent/rstar2/config/rstar2-qwen2.5-7b-megatron.yaml`` 中 ``rollout.model.model_path`` 的路径
 
 .. code-block:: yaml
 
@@ -124,25 +152,25 @@ Reward计算工具
       recompute_logprobs: False
       shuffle_rollout: False
 
-启动训练
-~~~~~~~~
+运行
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-运行 ``examples/rstar2/run_rstar2.sh`` 启动训练。
+运行 ``examples/agent/rstar2/run_rstar2.sh`` 启动训练。
 
 
-训练曲线
---------
+可视化与结果
+----------------------------------------
 
 下面展示 RLinf 与 Verl 的 reward 曲线和 response 长度曲线对比。
 
-.. figure:: https://github.com/RLinf/misc/raw/main/pic/rstar2-RLinf-7b.jpg
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/rstar2-RLinf-7b.jpg
    :width: 80%
    :align: center
    :alt: Qwen2.5-7B-Instruct in RLinf
 
    Qwen2.5-7B-Instruct in RLinf
 
-.. figure:: https://github.com/RLinf/misc/raw/main/pic/rstar2-Verl-7b.jpg
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/rstar2-Verl-7b.jpg
    :width: 80%
    :align: center
    :alt: Qwen2.5-7B-Instruct in Verl

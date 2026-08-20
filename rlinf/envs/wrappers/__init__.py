@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from rlinf.envs.wrappers.collect_episode import CollectEpisode
+from rlinf.envs.wrappers.insert_delay import InsertDelay
 from rlinf.envs.wrappers.record_video import RecordVideo
 
-__all__ = ["RecordVideo"]
+__all__ = ["CollectEpisode", "InsertDelay", "RecordVideo"]

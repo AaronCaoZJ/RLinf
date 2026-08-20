@@ -14,8 +14,9 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future as ConcurrentFuture
-from typing import Any, Callable, Optional, overload
+from typing import Any, Callable, Optional, Sequence, overload
 
 import ray.actor
 import torch.distributed as dist
@@ -64,6 +65,7 @@ class AsyncFuncWork(AsyncWork):
         self,
         func: Callable,
         *args,
+        pass_self: bool = False,
         **kwargs,
     ):
         """Initialize the AsyncFuncWork with a function and its arguments.
@@ -71,20 +73,52 @@ class AsyncFuncWork(AsyncWork):
         Args:
             func (Callable): The function to call when the work is completed.
             *args: Positional arguments to pass to the function.
+            pass_self (bool): If True, ``self`` (this AsyncFuncWork instance) is
+                prepended to ``func``'s positional arguments at call time. Use
+                this when the wrapped function needs to attribute timing or
+                other side effects back to this work without going through a
+                global / thread-local.
             **kwargs: Keyword arguments to pass to the function.
 
         """
         self._func = func
         self._args = args
         self._kwargs = kwargs
+        self._pass_self = pass_self
         self._done = Future()
         self._result = None
         self._next_work = None
         self._cuda_event = None
+        self._exec_time = None  # Time spent in the function execution
+        self._perf_time = None  # Time set externally
+
+    @property
+    def time(self) -> float:
+        """Get the performance time of the function."""
+        if self._perf_time is not None:
+            return self._perf_time
+        else:
+            return self._exec_time
+
+    def add_perf_time(self, perf_time: float):
+        """Accumulate ``perf_time`` into the work's payload-transfer time.
+
+        Used by collective payload-tracking helpers that may fire multiple times
+        per work (e.g. dataclass sends that ship a tensor list and a skeleton).
+        """
+        if self._perf_time is None:
+            self._perf_time = perf_time
+        else:
+            self._perf_time += perf_time
 
     def __call__(self, future: Future):
         """Execute the function and set the done flag."""
-        self._result = self._func(*self._args, **self._kwargs)
+        start = time.perf_counter()
+        if self._pass_self:
+            self._result = self._func(self, *self._args, **self._kwargs)
+        else:
+            self._result = self._func(*self._args, **self._kwargs)
+        self._exec_time = time.perf_counter() - start
         if (
             Worker.current_worker.has_accelerator
             and Worker.torch_platform.is_initialized()
@@ -384,3 +418,59 @@ class AsyncRayWork(AsyncWork):
     def wait(self):
         """Wait for the work to complete."""
         return ray.get(self._ray_object)
+
+
+class AsyncRouteWork(AsyncWork):
+    """Aggregate multiple async channel operations into one routed result."""
+
+    def __init__(
+        self,
+        works: Sequence[AsyncWork],
+        finalize_fn: Callable[[list[Any]], Any],
+    ):
+        """Initialize an async routed work handle.
+
+        Args:
+            works: Async work handles for each routed shard.
+            finalize_fn: Function that validates and merges completed shard results.
+        """
+        self._works = list(works)
+        self._finalize_fn = finalize_fn
+        self._result: Any = None
+        self._has_result = False
+
+    async def async_wait(self):
+        """Wait asynchronously for all routed works and return the finalized result."""
+        if self._has_result:
+            return self._result
+        results = [await work.async_wait() for work in self._works]
+        self._result = self._finalize_fn(results)
+        self._has_result = True
+        return self._result
+
+    def wait(self):
+        """Wait synchronously for all routed works and return the finalized result."""
+        if self._has_result:
+            return self._result
+        results = [work.wait() for work in self._works]
+        self._result = self._finalize_fn(results)
+        self._has_result = True
+        return self._result
+
+    def then(self, func: Callable, *args, **kwargs):
+        """Register a chained callback.
+
+        Raises:
+            NotImplementedError: AsyncRouteWork does not support chained callbacks.
+        """
+        raise NotImplementedError("AsyncRouteWork does not support chained callbacks.")
+
+    def done(self):
+        """Return whether all routed works have completed."""
+        if self._has_result:
+            return True
+        return all(work.done() for work in self._works)
+
+    def get_next_work(self):
+        """Return the next pending work if supported."""
+        return None

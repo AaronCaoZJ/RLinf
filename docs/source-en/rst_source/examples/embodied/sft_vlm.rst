@@ -1,18 +1,76 @@
-VLM Supervised Fine-Tuning (SFT)
-================================
+Qwen-VL
+========
 
-This document explains how to run **full-parameter supervised fine-tuning (Full-parameter SFT)** for VLM models in RLinf.
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/release_0.2/qwen2_5_sft_vlm.png
+   :align: center
+   :width: 85%
 
-This tutorial mainly focuses on two files:
+   Qwen2.5-VL supervised fine-tuning on the Robo2VLM visual-QA dataset.
 
-- Launch script: ``examples/sft/run_vlm_sft.sh``
-- Training config: ``examples/sft/config/custom_sft_vlm.yaml``
+Run **full-parameter** supervised fine-tuning for vision-language models (Qwen2.5-VL,
+Qwen3-VL, Qwen3-VL-MoE) on multimodal QA data with RLinf — train, evaluate, and convert
+the resulting checkpoint to HuggingFace format.
 
-Launch Script: ``examples/sft/run_vlm_sft.sh``
+Overview
+--------
 
-- The script uses ``examples/sft/config/custom_sft_vlm.yaml`` by default.
-- Logs are redirected to: ``<repo>/logs/<timestamp>/``
-- Actual command:
+Full-parameter SFT for Qwen-VL models on the Robo2VLM visual-QA dataset, with FSDP and built-in evaluation.
+
+.. grid:: 2 4 4 4
+   :gutter: 2
+
+   .. grid-item-card:: Models
+      :text-align: center
+
+      Qwen2.5-VL · Qwen3-VL · Qwen3-VL-MoE
+
+   .. grid-item-card:: Methods
+      :text-align: center
+
+      Full-parameter SFT
+
+   .. grid-item-card:: Data
+      :text-align: center
+
+      Robo2VLM (visual QA)
+
+   .. grid-item-card:: Hardware
+      :text-align: center
+
+      1–2 nodes · GPUs
+
+| **You'll do:** pull the image → download the model + Robo2VLM → edit the config → launch ``run_vlm_sft.sh`` → watch loss and eval accuracy.
+| **Prerequisites:** :doc:`Installation </rst_source/start/installation>` · Qwen-VL weights · the Robo2VLM dataset.
+
+This recipe centers on two files — the launch script ``examples/sft/run_vlm_sft.sh`` and
+the training config ``examples/sft/config/qwen2_5_vl_sft_vlm.yaml``.
+
+Installation
+------------
+
+1. **Pull the RLinf image:**
+   ``rlinf/rlinf:agentic-rlinf0.4-torch2.11.0-sglang0.5.12.post1-vllm0.23.0-megatron0.17.0-te2.17``.
+2. **Download model weights:** `Qwen2.5-VL-3B-Instruct <https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct>`_.
+3. **Download the dataset:** `Robo2VLM-1 <https://huggingface.co/datasets/keplerccc/Robo2VLM-1>`_.
+4. **Edit** ``examples/sft/config/qwen2_5_vl_sft_vlm.yaml`` and run ``examples/sft/run_vlm_sft.sh``.
+
+.. warning::
+
+   After downloading Robo2VLM, the train and eval parquet files are mixed in one
+   directory (e.g. ``train-00000-of-00262.parquet`` and ``test-0000X-of-00003.parquet``).
+   Split them into separate folders, or RLinf may load the entire dataset.
+
+.. note::
+
+   To train **qwen3_vl** or **qwen3_vl_moe**, make sure ``transformers >= 4.57.1``.
+
+Run It
+------
+
+**1. Configuration**
+
+The launch script uses ``examples/sft/config/qwen2_5_vl_sft_vlm.yaml`` by default and writes
+logs to ``<repo>/logs/<timestamp>/``. It runs:
 
 .. code:: bash
 
@@ -21,32 +79,8 @@ Launch Script: ``examples/sft/run_vlm_sft.sh``
      --config-name <your_config_name> \
      runner.logger.log_path=<auto_generated_log_dir>
 
-Config Template: ``examples/sft/config/custom_sft_vlm.yaml``
-
-The VLM config structure is similar to other RLinf training configs.  
-You mainly need to adapt ``data`` and ``actor.model`` for your VLM use case.
-
-Preparation Before Running
---------------------------
-
-1. Prepare the environment. Pull the RLinf Docker image:
-   ``rlinf/rlinf:math-rlinf0.1-torch2.6.0-sglang0.4.6.post5-vllm0.8.5-megatron0.13.0-te2.1``.
-2. Prepare model weights:
-   ``https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct``.
-3. Prepare Robo2VLM dataset:
-   ``https://huggingface.co/datasets/keplerccc/Robo2VLM-1``.
-4. Edit ``examples/sft/config/custom_sft_vlm.yaml`` and run
-   ``examples/sft/run_vlm_sft.sh``.
-
-Example YAML
-------------
-
-Important note: after downloading Robo2VLM, train and eval parquet files are mixed in one directory
-(e.g., ``train-00000-of-00262.parquet`` and ``test-0000X-of-00003.parquet``).
-Please split them into different folders. Otherwise, RLinf may load the entire dataset.
-
-In the example below, fields you must modify are already commented.
-Keep other parameters unchanged for a baseline run.
+The config structure matches other RLinf training configs; you mainly adapt ``data`` and
+``actor.model``. Fields you must change are commented; keep the rest unchanged for a baseline run.
 
 .. code:: yaml
 
@@ -83,7 +117,7 @@ Keep other parameters unchanged for a baseline run.
      # Data paths: split train and eval files into different directories
      train_data_paths: "/path/to/Robo2VLM-1/train_data"
      # For eval-only runs, set train_data_paths to null
-     eval_data_paths: "/path/to/Robo2VLM-1/test_data"
+     val_data_paths: "/path/to/Robo2VLM-1/test_data"
 
      # Keys must match dataset columns
      prompt_key: "question"
@@ -142,127 +176,146 @@ Keep other parameters unchanged for a baseline run.
    critic:
      use_critic_model: False
 
-Start Training
-----------------------
+**2. Launch**
 
-Run from repository root:
+Run from the repository root:
 
 .. code:: bash
 
    bash examples/sft/run_vlm_sft.sh
 
-Notes:
+- With no argument, the script uses ``qwen2_5_sft_vlm`` by default.
+- For a different config (e.g. ``my_vlm_config.yaml``), pass its name: ``bash examples/sft/run_vlm_sft.sh my_vlm_config``.
 
-- If no argument is provided, the script uses ``custom_sft_vlm`` by default.
-- If your config name is different (e.g., ``my_vlm_config.yaml``), pass it as an argument:
+Eval-Only Mode
+~~~~~~~~~~~~~~
 
-.. code:: bash
-
-   bash examples/sft/run_vlm_sft.sh my_vlm_config
-
-Check Whether Training Is Healthy
------------------------------------------
-
-1. Check if loss decreases in terminal logs.
-2. Check the generated log directory (script creates ``logs/<timestamp>`` automatically).
-3. Visualize with TensorBoard:
-
-.. code:: bash
-
-   tensorboard --logdir /path/to/RLinf/logs --port 6006
-
-Open in browser: ``http://localhost:6006``
-
-Eval-Only Mode (No Training)
-----------------------------
-
-If you only want evaluation, update config as:
-
-- ``data.train_data_paths: null``
-- ``data.eval_data_paths: "/eval_data_path"``
-
-Use the same launch command:
+To run evaluation only, set ``data.train_data_paths: null`` and point
+``data.val_data_paths`` at your validation data, then use the same launch command:
 
 .. code:: bash
 
    bash examples/sft/run_vlm_sft.sh <config_name>
 
-Experiment Results
-------------------
+Visualization and Results
+-------------------------
 
-We provide a reference experiment run on a single machine with 8 × H100 GPUs for 6000 iterations.
+A healthy run shows the **loss** decreasing and the **eval accuracy** climbing. The script
+creates ``logs/<timestamp>`` automatically; visualize with TensorBoard. For every logged
+metric, see :doc:`Training metrics <../../reference/metrics>`.
 
-Evaluation accuracy on test_data every 1000 iterations:
+.. code:: bash
 
-.. image:: https://github.com/RLinf/misc/raw/main/pic/sft_vlm_eval_accuracy.png
-   :alt: VLM SFT eval accuracy
+   tensorboard --logdir /path/to/RLinf/logs --port 6006
+   # open http://localhost:6006
+
+Reference runs across model scales:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 20 14 32
+
+   * - Model
+     - Hardware
+     - Iters
+     - Eval accuracy (before → after)
+   * - Qwen2.5-VL-3B
+     - 8 × H100
+     - 6000
+     - — → 89.96%
+   * - Qwen3-VL-4B
+     - 4 × H100
+     - 6000
+     - — → 96.9%
+   * - Qwen3-VL-30B-A3B (MoE)
+     - 2 × 8 × A100
+     - 1000
+     - 58.4% → 91.3%
+
+**Qwen2.5-VL-3B** — eval accuracy, grad_norm, and loss every 1000 iterations:
+
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/sft_vlm_eval_accuracy.png
+   :alt: Qwen2.5-VL-3B VLM SFT eval accuracy
    :width: 85%
    :align: center
 
-grad_norm curve:
-
-.. image:: https://github.com/RLinf/misc/raw/main/pic/sft_vlm_eval_grad_norm.png
-   :alt: VLM SFT grad norm
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/sft_vlm_eval_grad_norm.png
+   :alt: Qwen2.5-VL-3B VLM SFT grad norm
    :width: 85%
    :align: center
 
-loss curve:
-
-.. image:: https://github.com/RLinf/misc/raw/main/pic/sft_vlm_eval_loss.png
-   :alt: VLM SFT loss
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/sft_vlm_eval_loss.png
+   :alt: Qwen2.5-VL-3B VLM SFT loss
    :width: 85%
    :align: center
 
-Final eval accuracy: ``0.8995802998542786`` (about ``89.96%``).
+**Qwen3-VL-4B** — eval accuracy, grad_norm, and loss every 1000 iterations:
 
-Checkpoint Notes
-----------------
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/qwen3_sft_vlm_eval_accuracy.png
+   :alt: Qwen3-VL-4B VLM SFT eval accuracy
+   :width: 85%
+   :align: center
 
-SFT with FSDP saves checkpoints in FSDP format (for example, ``full_weights.pt``).
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/qwen3_sft_vlm_eval_grad_norm.png
+   :alt: Qwen3-VL-4B VLM SFT grad norm
+   :width: 85%
+   :align: center
 
-If you need HuggingFace format, use the built-in converter:
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/qwen3_sft_vlm_eval_loss.png
+   :alt: Qwen3-VL-4B VLM SFT loss
+   :width: 85%
+   :align: center
 
-- Script: ``toolkits/ckpt_convertor/fsdp_convertor/convert_pt_to_hf.sh``
-- Config: ``toolkits/ckpt_convertor/fsdp_convertor/config/fsdp_model_convertor.yaml``
+**Qwen3-VL-30B-A3B (MoE)** — grad_norm and loss over 1000 iterations:
 
-Update these fields first:
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/qwen3_moe_sft_vlm_eval_grad_norm.png
+   :alt: Qwen3-VL-30B-A3B MoE VLM SFT grad norm
+   :width: 85%
+   :align: center
+
+.. image:: https://raw.githubusercontent.com/RLinf/misc/main/pic/qwen3_moe_sft_vlm_eval_loss.png
+   :alt: Qwen3-VL-30B-A3B MoE VLM SFT loss
+   :width: 85%
+   :align: center
+
+Checkpoint Conversion
+---------------------
+
+SFT with FSDP saves checkpoints in FSDP format (for example, ``full_weights.pt``). To get
+HuggingFace format, use the built-in converter
+``rlinf/utils/ckpt_convertor/fsdp_convertor/convert_pt_to_hf.py`` with the
+``fsdp_model_convertor`` config. First set, in
+``rlinf/utils/ckpt_convertor/fsdp_convertor/config/fsdp_model_convertor.yaml``:
 
 - ``convertor.ckpt_path``: path to ``full_weights.pt``
 - ``convertor.save_path``: output HF model directory
 - ``model.model_path``: base model path
-- ``model.model_type``: model type (e.g., ``qwen2.5_vl``)
+- ``model.model_type``: model type (e.g. ``qwen2.5_vl``, ``qwen3_vl``, or ``qwen3_vl_moe``)
 
-Run:
+Then run:
 
 .. code:: bash
 
-   bash toolkits/ckpt_convertor/fsdp_convertor/convert_pt_to_hf.sh
+   python -m rlinf.utils.ckpt_convertor.fsdp_convertor.convert_pt_to_hf \
+       --config-path rlinf/utils/ckpt_convertor/fsdp_convertor/config \
+       --config-name fsdp_model_convertor
+
+See :doc:`Checkpoint conversion <../../guides/convertor>` for details.
 
 Field Reference
 ---------------
 
-- ``micro_batch_size``: per-GPU batch size per forward/backward
-- ``global_batch_size``: total batch size across all GPUs (must be divisible)
-- ``max_epochs``: number of full passes over dataset
-- ``save_interval``: checkpoint save frequency (in steps)
-- ``model_path``: local model directory (must exist)
-- ``train_data_paths/eval_data_paths``: dataset directory or file path
+- ``micro_batch_size``: per-GPU batch size per forward/backward.
+- ``global_batch_size``: total batch size across all GPUs (must be divisible).
+- ``max_epochs``: number of full passes over the dataset.
+- ``save_interval``: checkpoint save frequency (in steps).
+- ``model_path``: local model directory (must exist).
+- ``train_data_paths`` / ``val_data_paths``: dataset directory or file path.
 
 Common Issues and Fixes
 -----------------------
 
-1. **Model path not found**
-   - Verify ``actor.model.model_path`` is correct and readable.
-
-2. **Dataset key mismatch**
-   - Verify ``prompt_key/choice_key/answer_key/image_keys`` match your dataset columns.
-
-3. **OOM (out of memory)**
-   - Reduce ``micro_batch_size`` first.
-   - Reduce ``num_workers`` if needed.
-   - If still OOM, use a smaller model or shorter input length.
-
-4. **You only want a quick smoke test**
-   - Use a very small data subset.
-   - Set ``max_epochs`` to 1.
-   - Set smaller ``save_interval`` for faster feedback.
+- **Model path not found** — verify ``actor.model.model_path`` is correct and readable.
+- **Dataset key mismatch** — verify ``prompt_key`` / ``choice_key`` / ``answer_key`` / ``image_keys`` match your dataset columns.
+- **OOM (out of memory)** — reduce ``micro_batch_size`` first, then ``num_workers``; if it persists, use a smaller model or shorter input length.
+- **Quick smoke test** — use a very small data subset, set ``max_epochs`` to 1, and set a smaller ``save_interval`` for faster feedback.

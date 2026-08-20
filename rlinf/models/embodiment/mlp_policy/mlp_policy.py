@@ -15,6 +15,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
@@ -32,9 +33,12 @@ class MLPPolicy(nn.Module, BasePolicy):
         add_value_head,
         add_q_head,
         q_head_type="default",
+        value_granularity="action_level",
+        critic_obs_dim=None,
     ):
         super().__init__()
         self.obs_dim = obs_dim
+        self.critic_obs_dim = critic_obs_dim or obs_dim
         self.action_dim = action_dim
         self.num_action_chunks = num_action_chunks
         self.torch_compile_enabled = False
@@ -44,10 +48,19 @@ class MLPPolicy(nn.Module, BasePolicy):
         activation = "tanh"
         action_scale = None
 
+        self.value_granularity = value_granularity
+
         assert add_value_head + add_q_head <= 1
+        output_dim = (
+            1 if self.value_granularity == "chunk_level" else self.num_action_chunks
+        )
+
         if add_value_head:
             self.value_head = ValueHead(
-                obs_dim, hidden_sizes=(256, 256, 256), activation=activation
+                obs_dim,
+                hidden_sizes=(256, 256, 256),
+                activation=activation,
+                output_dim=output_dim,
             )
         if add_q_head:
             self.independent_std = False
@@ -56,17 +69,19 @@ class MLPPolicy(nn.Module, BasePolicy):
             action_scale = -1, 1
             if q_head_type == "default":
                 self.q_head = MultiQHead(
-                    hidden_size=obs_dim,
+                    hidden_size=self.critic_obs_dim,
                     hidden_dims=[256, 256, 256],
                     num_q_heads=2,
-                    action_feature_dim=action_dim,
+                    output_dim=output_dim,
+                    action_feature_dim=action_dim * self.num_action_chunks,
                 )
             elif q_head_type == "crossq":
                 self.q_head = MultiCrossQHead(
-                    hidden_size=obs_dim,
+                    hidden_size=self.critic_obs_dim,
                     hidden_dims=[256, 256, 256],
                     num_q_heads=2,
-                    action_feature_dim=action_dim,
+                    output_dim=output_dim,
+                    action_feature_dim=action_dim * self.num_action_chunks,
                 )
             else:
                 raise ValueError(f"Invalid q_head_type: {q_head_type}")
@@ -81,12 +96,15 @@ class MLPPolicy(nn.Module, BasePolicy):
             layer_init(nn.Linear(256, 256)),
             act(),
         )
-        self.actor_mean = layer_init(nn.Linear(256, action_dim), std=0.01 * np.sqrt(2))
-
+        self.actor_mean = layer_init(
+            nn.Linear(256, self.num_action_chunks * action_dim), std=0.01 * np.sqrt(2)
+        )
         if self.independent_std:
-            self.actor_logstd = nn.Parameter(torch.ones(1, action_dim) * -0.5)
+            self.actor_logstd = nn.Parameter(
+                torch.ones(1, self.num_action_chunks * action_dim) * -0.5
+            )
         else:
-            self.actor_logstd = nn.Linear(256, action_dim)
+            self.actor_logstd = nn.Linear(256, self.num_action_chunks * action_dim)
 
         if action_scale is not None:
             l, h = action_scale
@@ -105,6 +123,17 @@ class MLPPolicy(nn.Module, BasePolicy):
         device = next(self.parameters()).device
         return {"states": env_obs["states"].to(device)}
 
+    def prepare_dagger_sft_batch(self, batch):
+        """Prepare replay-buffer samples for DAgger SFT updates."""
+        target_actions = (
+            batch["model_action"] if "model_action" in batch else batch["action"]
+        )
+        return {"states": batch["states"], "action": target_actions}
+
+    def prepare_lerobot_sft_batch(self, batch):
+        """Prepare replay-buffer samples for DAgger SFT updates."""
+        return {"states": batch["state"], "action": batch["actions"]}
+
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         obs = kwargs.get("obs")
         if obs is not None:
@@ -115,7 +144,9 @@ class MLPPolicy(nn.Module, BasePolicy):
             next_obs = self.preprocess_env_obs(next_obs)
             kwargs.update({"next_obs": next_obs})
 
-        if forward_type == ForwardType.SAC:
+        if forward_type == ForwardType.SFT:
+            return self.sft_forward(**kwargs)
+        elif forward_type == ForwardType.SAC:
             return self.sac_forward(**kwargs)
         elif forward_type == ForwardType.SAC_Q:
             return self.sac_q_forward(**kwargs)
@@ -127,6 +158,23 @@ class MLPPolicy(nn.Module, BasePolicy):
             return self.default_forward(**kwargs)
         else:
             raise NotImplementedError
+
+    def sft_forward(self, data, **kwargs):
+        states = data["states"]
+        target_actions = data["action"]
+
+        feat = self.backbone(states)
+        pred_actions = self.actor_mean(feat)
+
+        if pred_actions.shape != target_actions.shape:
+            if pred_actions.numel() != target_actions.numel():
+                raise ValueError(
+                    "MLP DAgger targets must match the predicted action shape, "
+                    f"got predicted {pred_actions.shape} and target {target_actions.shape}."
+                )
+            target_actions = target_actions.reshape_as(pred_actions)
+
+        return F.mse_loss(pred_actions, target_actions, reduction="none")
 
     def sac_forward(self, obs, **kwargs):
         feat = self.backbone(obs["states"])
@@ -260,8 +308,7 @@ class MLPPolicy(nn.Module, BasePolicy):
             env_obs["states"], mode=mode, calculate_values=calculate_values
         )
 
-        chunk_actions = chunk_actions.cpu().numpy()
-        forward_inputs = {"action": action}
+        forward_inputs = {"action": action, "model_action": action}
         if return_obs:
             forward_inputs["states"] = env_obs["states"]
 

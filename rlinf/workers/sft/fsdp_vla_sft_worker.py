@@ -11,16 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import Any
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
-from torch.utils import _pytree
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from rlinf.config import SupportedModel
 from rlinf.models.embodiment.base_policy import ForwardType
-from rlinf.utils.pytree import register_pytree_dataclasses
+from rlinf.utils.utils import get_rng_state, set_rng_state
 from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
 
 
@@ -423,15 +424,28 @@ class FSDPVlaSftWorker(FSDPSftWorker):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
-    def build_dataloader(self, data_paths: list[str], eval_dataset: bool = False):
-        if SupportedModel(self.cfg.actor.model.model_type) in [SupportedModel.OPENPI]:
+    def build_dataloader(self, data_paths: Any, eval_dataset: bool = False):
+        model_type = SupportedModel(self.cfg.actor.model.model_type)
+        if model_type == SupportedModel.OPENPI_RLINF:
+            from rlinf.data.datasets.openpi_rlinf import (
+                build_openpi_rlinf_sft_dataloader,
+            )
+
+            return build_openpi_rlinf_sft_dataloader(
+                self.cfg, self._world_size, self._rank, data_paths, eval_dataset
+            )
+        elif model_type == SupportedModel.OPENPI:
+            # NOTE: we deliberately keep our own OpenPI path instead of upstream's
+            # build_official_openpi_sft_dataloader, because upstream has no sim-real
+            # co-training weighted sampling (num_real_episodes / co_training_ratio /
+            # neg_loss_weight) and no action_subsample_stride support.
             import openpi.training.data_loader as openpi_data_loader
 
             from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
 
-            action_subsample_stride = getattr(
-                self.cfg.actor.model.openpi, "action_subsample_stride", 1
-            ) or 1
+            action_subsample_stride = (
+                getattr(self.cfg.actor.model.openpi, "action_subsample_stride", 1) or 1
+            )
             config = get_openpi_config(
                 self.cfg.actor.model.openpi.config_name,
                 model_path=self.cfg.actor.model.model_path,
@@ -441,24 +455,27 @@ class FSDPVlaSftWorker(FSDPSftWorker):
 
             num_real_episodes = getattr(self.cfg.data, "num_real_episodes", None)
             alpha = getattr(self.cfg.data, "co_training_ratio", None)
-
             neg_loss_weight = getattr(self.cfg.data, "neg_loss_weight", 1.0)
 
             if num_real_episodes is not None and alpha is not None:
                 data_loader = self._build_weighted_openpi_loader(
-                    config, num_real_episodes, float(alpha),
+                    config,
+                    num_real_episodes,
+                    float(alpha),
                     action_subsample_stride=action_subsample_stride,
                     neg_loss_weight=float(neg_loss_weight),
                 )
             else:
                 # For non-weighted path: temporarily inflate action_horizon so the dataset
-                # loads action_horizon*stride frames; stride-aware action transform reduces
-                # it back to the model action_horizon.
+                # loads action_horizon*stride frames; the stride-aware action transform
+                # reduces it back to the model action_horizon.
                 if action_subsample_stride > 1:
                     import dataclasses
+
                     inflated_model = dataclasses.replace(
                         config.model,
-                        action_horizon=config.model.action_horizon * action_subsample_stride,
+                        action_horizon=config.model.action_horizon
+                        * action_subsample_stride,
                     )
                     config_for_load = dataclasses.replace(config, model=inflated_model)
                 else:
@@ -467,6 +484,30 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     config_for_load, framework="pytorch", shuffle=True
                 )
             return data_loader, data_loader.data_config()
+        elif model_type == SupportedModel.LINGBOTVLA:
+            from rlinf.models.embodiment.lingbotvla.sft_builder import (
+                build_lingbot_sft_dataloader,
+            )
+
+            return build_lingbot_sft_dataloader(
+                self.cfg, self._world_size, self._rank, data_paths
+            )
+        elif model_type == SupportedModel.DREAMZERO:
+            from rlinf.data.datasets.dreamzero import (
+                build_dreamzero_sft_dataloader,
+            )
+
+            return build_dreamzero_sft_dataloader(
+                self.cfg, self._world_size, self._rank, data_paths, eval_dataset
+            )
+        elif model_type == SupportedModel.EVO1:
+            from rlinf.models.embodiment.evo1.sft_builder import (
+                build_evo1_sft_dataloader,
+            )
+
+            return build_evo1_sft_dataloader(
+                self.cfg, self._world_size, self._rank, data_paths
+            )
         else:
             raise KeyError(
                 f"not support such model type {self.cfg.actor.model.model_type} for SFT right now."
@@ -594,40 +635,126 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         # now the eval is not supported for embodied sft
         raise NotImplementedError("eval is not supported for embodied sft right now.")
 
-    def get_train_model_output(self, batch: dict[str, Any]):
-        data = next(self.data_iter)
-        if len(data) == 3:
-            observation, actions, loss_weights = data
-            loss_weights = loss_weights.to(device=self.device, dtype=torch.float32)
-        else:
-            observation, actions = data
-            loss_weights = None
+    def get_train_model_output(self, batch: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        # The weighted co-training loader yields (observation, actions, loss_weights);
+        # the plain OpenPI loader yields (observation, actions). Any other backend hands
+        # the batch straight to the model (upstream behaviour).
+        # NOTE: the batch comes from the base class, which already advanced data_iter.
+        #       Do NOT pull from self.data_iter here or every other batch is discarded.
+        loss_weights = None
+        data = batch
+        if isinstance(batch, (list, tuple)) and len(batch) in (2, 3):
+            if len(batch) == 3:
+                observation, actions, loss_weights = batch
+                loss_weights = loss_weights.to(device=self.device, dtype=torch.float32)
+            else:
+                observation, actions = batch
 
-        register_pytree_dataclasses(observation)
-        observation = _pytree.tree_map(
-            lambda x: torch.as_tensor(x, device=self.device).contiguous().clone()
-            if x is not None
-            else x,
-            observation,
-        )
-        actions = actions.to(torch.float32)
-        actions = actions.to(self.device)
+            register_pytree_dataclasses(observation)
+            observation = _pytree.tree_map(
+                lambda x: torch.as_tensor(x, device=self.device).contiguous().clone()
+                if x is not None
+                else x,
+                observation,
+            )
+            actions = actions.to(torch.float32).to(self.device)
+            data = {"observation": observation, "actions": actions}
 
         with self.amp_context:
-            losses = self.model(
-                forward_type=ForwardType.SFT,
-                data={"observation": observation, "actions": actions},
-            )
+            output = self.model(forward_type=ForwardType.SFT, data=data)
+
+        if isinstance(output, torch.Tensor):
+            loss = output
+        elif isinstance(output, dict):
+            loss = output["loss"]
+        elif isinstance(output, (list, tuple)):
+            loss = torch.stack(list(output))
+        else:
+            loss = torch.as_tensor(output, device=self.device, dtype=torch.float32)
 
         if loss_weights is not None:
-            # losses: (batch, action_horizon, action_dim), loss_weights: (batch,)
-            # Broadcast weight over all non-batch dims.
-            if not isinstance(losses, torch.Tensor):
-                losses = torch.stack(losses) if isinstance(losses, (list, tuple)) else \
-                    torch.tensor(losses, device=self.device, dtype=torch.float32)
+            # loss: (batch, action_horizon, action_dim), loss_weights: (batch,)
+            # Broadcast the per-sample weight over all non-batch dims.
             weight = loss_weights
-            while weight.dim() < losses.dim():
+            while weight.dim() < loss.dim():
                 weight = weight.unsqueeze(-1)
-            losses = losses * weight
+            loss = loss * weight
 
-        return losses
+        # The base class expects a scalar loss; it no longer reduces on our behalf.
+        if loss.dim() > 0:
+            loss = loss.mean()
+
+        step_metrics = {"loss": loss.detach().item()}
+        if isinstance(output, dict):
+            for key, value in output.items():
+                if key == "loss":
+                    continue
+                if torch.is_tensor(value):
+                    if value.numel() == 1:
+                        step_metrics[key] = value.detach().item()
+                elif isinstance(value, (float, int)):
+                    step_metrics[key] = value
+        return loss, step_metrics
+
+
+    def save_checkpoint(self, save_path: str, step: int = 0) -> None:
+        super().save_checkpoint(save_path, step)
+
+        if isinstance(self.data_loader, StatefulDataLoader):
+            state = self.data_loader.state_dict()
+
+            all_states = [None] * self._world_size
+            torch.distributed.all_gather_object(all_states, state)
+
+            if self._rank == 0:
+                torch.save(all_states, os.path.join(save_path, "data.pt"))
+
+            torch.distributed.barrier()
+
+            rng_state = get_rng_state()
+            all_rng_states = [None] * self._world_size
+            torch.distributed.all_gather_object(all_rng_states, rng_state)
+            if self._rank == 0:
+                torch.save(all_rng_states, os.path.join(save_path, "rng.pt"))
+
+            torch.distributed.barrier()
+
+    def load_checkpoint(self, load_path: str) -> None:
+        super().load_checkpoint(load_path)
+
+        if isinstance(self.data_loader, StatefulDataLoader):
+            all_states = torch.load(
+                os.path.join(load_path, "data.pt"), weights_only=False
+            )
+            state = all_states[self._rank]
+            self.data_loader.load_state_dict(state)
+            self.data_iter = iter(self.data_loader)
+
+            rng_path = os.path.join(load_path, "rng.pt")
+            if os.path.exists(rng_path):
+                all_rng_states = torch.load(rng_path, weights_only=False)
+                set_rng_state(all_rng_states[self._rank])
+
+            torch.distributed.barrier()
+
+    def get_max_steps_per_epoch(self):
+        if self.data_loader is None:
+            return 0
+        model_type = SupportedModel(self.cfg.actor.model.model_type)
+        if model_type in (SupportedModel.OPENPI_RLINF, SupportedModel.OPENPI):
+            from rlinf.data.datasets.openpi_rlinf import (
+                get_official_openpi_sft_num_batches,
+                is_official_openpi_sft_dataloader,
+            )
+
+            # Our OpenPI branch may return a custom (weighted) loader, so guard the
+            # official-loader helper for BOTH model types, not just OPENPI_RLINF.
+            num_batches = (
+                get_official_openpi_sft_num_batches(self.data_loader)
+                if is_official_openpi_sft_dataloader(self.data_loader)
+                else len(self.data_loader)
+            )
+        else:
+            return super().get_max_steps_per_epoch()
+        return max(1, num_batches // self.gradient_accumulation)
+

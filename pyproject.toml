@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rlinf"
-version = "0.2.0.dev2"
+version = "0.4.0"
 authors = [{ name = "RLinf Contributors" }]
 description = "Reinforcement Learning Infrastructure for Embodied and Agentic AI"
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10,<=3.11.14"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 keywords = [
     "reinforcement-learning",
@@ -21,10 +21,9 @@ classifiers = [
     #   4 - Beta
     #   5 - Production/Stable
     "Development Status :: 2 - Pre-Alpha",
-    "Environment :: GPU :: NVIDIA CUDA :: 12 :: 12.4",
+    "Environment :: GPU :: NVIDIA CUDA :: 12 :: 12.8",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
 ]
 
 
@@ -32,8 +31,9 @@ dependencies = [
     # Core System
     # These are the dependencies of the core scheduler
     "ray[default]>=2.47.0",
-    "torch>=2.5.0,<=2.9.0",
-    "hydra-core",
+    "torch>=2.5.0",
+    # dev8 rejects our version_base="1.1"; prerelease bound keeps agentic's dev1 pin valid
+    "hydra-core<1.4.0.dev8",
     "numpy",
 
     # Data processing
@@ -58,12 +58,13 @@ dependencies = [
     "pip",
     "huggingface_hub",
     "icmplib",
-    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
 
     # Logging
-    "wandb",
+    "wandb<0.25.1",
     "swanlab>=0.6.11",
     "tensorboard",
+
+    "sortedcontainers"
 ]
 
 [project.urls]
@@ -73,25 +74,8 @@ Documentation = "https://rlinf.readthedocs.io/"
 "Bug Report" = "https://github.com/RLinf/RLinf/issues"
 
 [project.optional-dependencies]
-agentic-sglang = [
-    "sglang[all]==0.4.6.post5",
-    "torch-memory-saver",
+agentic = [
     "numpy==2.2",
-    "transformers==4.51.1",
-    # uvloop is not compatible with simulators, put it here
-    "uvloop==0.21.0",
-    "hydra-core==1.4.0.dev1",
-    "omegaconf==2.4.0.dev4",
-    "word2number",
-    "regex",
-    "peft==0.11.1",
-    "rlinf_latex2sympy2",
-    "mcp",
-]
-agentic-vllm = [
-    "vllm==0.8.5",
-    "numpy==2.2",
-    "transformers==4.51.1",
     # uvloop is not compatible with simulators, put it here
     "uvloop==0.21.0",
     "hydra-core==1.4.0.dev1",
@@ -104,6 +88,7 @@ agentic-vllm = [
 ]
 embodied = [
     "transformers<=4.57.6",
+    "torchcodec",
     "peft",
     "timm",
     "imageio[ffmpeg]",
@@ -113,38 +98,67 @@ embodied = [
 franka = [
     "pyyaml",
     "rospkg",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "empy==3.3.4",
     "gymnasium==0.29.1",
-    "pyrealsense2",
     "pyquaternion",
     "opencv-python",
     "defusedxml",
-    "pyspacemouse==1.1.5", 
+    "pyspacemouse>=2.0.0",
+    "pymodbus>=3.0,<4.0",
+    "pyserial",
     "imageio[ffmpeg]",
-    "pynput"
+    "evdev",
+    "numpy<2",
+    "pyzmq",
+    "websockets"
+]
+xsquare_turtle2 = [
+    "pyyaml",
+    "rospkg",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "toppra==0.6.3",
+    "numpy==1.26.4",
+    "empy==3.3.4",
+    "gymnasium==0.29.1",
+    "pyquaternion",
+    "opencv-python",
+    "defusedxml",
+    "pyspacemouse>=2.0.0",
+    "imageio[ffmpeg]",
+    "evdev",
+]
+gim_arm = [
+    "numpy",
+    "scipy",
+    "gymnasium",
+    "opencv-python",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "imageio[ffmpeg]",
 ]
 
 [tool.uv]
-prerelease = "allow"
 conflicts = [
     [
-      { extra = "agentic-sglang" },
-      { extra = "agentic-vllm" },
+      { extra = "agentic" },
       { extra = "embodied" },
-      { extra = "franka" }
+      { extra = "franka" },
+      { extra = "xsquare_turtle2" },
+      { extra = "gim_arm" }
     ],
 ]
 override-dependencies = [
-    "torch==2.6.0",
-    "torchvision==0.21.0",
-    "torchaudio==2.6.0",
-    "torchcodec==0.2",
-    "xgrammar==0.1.19",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "torchcodec>=0.11,<0.12",
     "uvloop==0.21.0",
-    "tensorflow-addons==0.23.0",
+    "tensorflow-addons==0.23.0 ; platform_machine == 'x86_64'",
     "setuptools>=69.5.1,<75.9",
     "datasets==3.6.0",
-    "peft==0.11.1",
+    "pywin32==306; sys_platform == 'win32'",
+    "sympy>=1.13.1",
+    "tensorflow-metadata<=1.17.3",
 ]
 
 [tool.setuptools]
@@ -192,3 +206,4 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
+

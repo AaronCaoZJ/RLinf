@@ -25,9 +25,7 @@ from fastapi import FastAPI, Request, Response
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from rlinf.data.io_struct import (
-    RolloutResult,
-)
+from rlinf.data.schema.reasoning_results import RolloutResult
 from rlinf.scheduler import Channel, Worker
 
 
@@ -167,9 +165,9 @@ class ServerRolloutWorker(Worker):
         )
 
         # Configuration
-        self._server_host = cfg.server.tracking_rollout.get("host", "0.0.0.0")
-        self._server_port = cfg.server.tracking_rollout.get("port", 8082)
-        self._enable_dummy_data = cfg.server.tracking_rollout.get(
+        self._server_host = cfg.rollout_server.tracking_rollout.get("host", "0.0.0.0")
+        self._server_port = cfg.rollout_server.tracking_rollout.get("port", 8082)
+        self._enable_dummy_data = cfg.rollout_server.tracking_rollout.get(
             "enable_dummy_data", False
         )
 
@@ -304,8 +302,7 @@ class ServerRolloutWorker(Worker):
             response_lengths=[len(output_ids)],
             response_ids=[output_ids],
             is_end=[True],  # Assume the response is complete
-            rewards=torch.tensor([reward_score], dtype=torch.float32).reshape(-1, 1),
-            advantages=[0.0],  # Will be computed later in the training pipeline
+            rewards=torch.tensor([reward_score], dtype=torch.float32),
             prompt_texts=[input_text],
             response_texts=[output_text],
             answers=[output_text],
@@ -328,7 +325,7 @@ class ServerRolloutWorker(Worker):
         # start tracking new data
         self._track_data_enable = True
         if self._enable_dummy_data:
-            for i in range(self._batch_size):
+            for _ in range(self._batch_size):
                 data = {
                     "prompt": "Hello, world!",
                     "completion": "Hello, world!",
@@ -336,7 +333,7 @@ class ServerRolloutWorker(Worker):
                 }
                 await self._data_source.put(data)
 
-        for i in range(self._batch_size):
+        for _ in range(self._batch_size):
             # Get data from unified source (either HTTP or Channel)
             data = await self._data_source.get()
 

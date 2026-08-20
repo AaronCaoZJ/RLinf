@@ -1,106 +1,126 @@
-Franka真机强化学习
-============================
+Real-World RL
+=============
 
 .. |huggingface| image:: /_static/svg/hf-logo.svg
    :width: 16px
    :height: 16px
    :class: inline-icon
 
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/franka_arm_small.jpg
+   :align: center
+   :width: 80%
 
-本文档给出在 RLinf 框架内启动在 Franka 机械臂真机环境中训练任务的完整指南，
-重点介绍如何从零开始训练基于 ResNet 的 CNN 策略以完成机器人操作任务。
+   基础 RLinf 真机 RL 流程使用的 Franka Emika Panda 机械臂。
 
-主要目标是让模型具备以下能力：
+使用 RLinf 在 Franka Emika Panda 机械臂上训练和评测真机策略。你将配置控制节点与训练节点，采集示教数据，运行 SAC / RLPD 或 PPO 类训练，并在真实硬件上监控安全的在线更新。
 
-1. **视觉理解**：处理来自机器人相机的 RGB 图像。  
-2. **动作生成**：产生精确的机器人动作（位置、旋转、夹爪控制）。  
-3. **强化学习**：结合环境反馈，使用 SAC 优化策略。
+概览
+----------------------------------------
 
-环境
------------
+从相机观测和机器人反馈中训练真机操作策略。
 
-**真实世界环境**
+.. grid:: 2 4 4 4
+   :gutter: 2
 
-- **Environment**: 真机设置
+   .. grid-item-card:: 模型
+      :text-align: center
 
-  - Franka Emika Panda 机械臂
-  - Realsense 相机
-  - 可能使用空间鼠标进行数据采集和人类干预
-- **Task**: 目前支持插块插入（Peg Insertion）和充电器插电（Charger）任务
-- **Observation**: 腕部或第三人称相机的 RGB 图像（128×128）
-- **Action Space**: 6 维或 7 维连续动作，取决于是否包含夹爪控制：
+      CNN policy · OpenPI π₀.₅
 
-  - 三维位置控制（x, y, z）
-  - 三维旋转控制（roll, pitch, yaw）
-  - 夹爪控制（开/合）
+   .. grid-item-card:: 算法
+      :text-align: center
 
-**数据结构**
+      SAC · Cross-Q · RLPD · PPO
 
-- **Images**: RGB 张量 ``[batch_size, 128, 128, 3]``
-- **Actions**:归一化取值在 ``[-1, 1]`` 的连续值
-- **Rewards**: 基于任务完成度的逐步奖励
+   .. grid-item-card:: 任务
+      :text-align: center
 
+      Peg insertion · charger · PnP
 
-算法
------------------------------------------
+   .. grid-item-card:: 硬件
+      :text-align: center
 
-**核心算法组件**
+      Franka · RealSense/ZED · gripper
 
-1. **SAC (Soft Actor-Critic)**
+| **你将完成:** 安装控制端依赖 → 采集示教 → 启动 Ray → 发起真机训练 → 观察 ``env/reward`` 和视频.
+| **前置条件:** :doc:`安装 </rst_source/start/installation>` · Franka firmware/libfranka 匹配 · 局域网 · 安全操作员.
 
-   - 通过 Bellman 公式和熵正则化学习 Q 值。
+任务
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   - 学习策略网络以最大化熵正则化的 Q 值。
+.. list-table::
+   :header-rows: 1
+   :widths: 24 24 24
 
-   - 学习温度参数以平衡探索与利用。
+   * - 任务
+     - 配置 / 入口
+     - 说明
+   * - Peg insertion
+     - ``realworld_peginsertion_rlpd_cnn_async``
+     - 在目标末端位姿完成插块插入。
+   * - Charger
+     - ``realworld_charger_sac_cnn_async``
+     - 通过真机奖励反馈完成充电器对齐与插入。
+   * - PnP / eval
+     - ``realworld_pnp_*``
+     - 采集或部署 pick-and-place 类策略。
 
-2. **Cross-Q**
+观测与动作
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   - SAC 的一种变体，去除了目标 Q 网络。
+.. list-table::
+   :header-rows: 1
+   :widths: 24 24
 
-   - 在一个批次中连接当前观测和下一个观测，结合 BatchNorm 实现 Q 的稳定训练。
-
-3. **RLPD (Reinforcement Learning with Prior Data)**
-
-   - SAC 的一种变体，结合离线数据和在线数据进行训练。
-
-   - 使用较大的网络更新与数据更新比例，以提高数据效率。
-
-4. **CNN Policy Network**
-
-   - 基于 ResNet 的视觉输入处理架构。
-
-   - 使用 MLP 层融合图像和状态以输出动作。
-
-   - 用多个 Q-head 实现 Critic 功能。
-
+   * - 字段
+     - 说明
+   * - Observation
+     - RGB 相机帧，以及可选机器人状态。
+   * - Action
+     - 6D/7D 连续笛卡尔增量动作，可包含夹爪控制。
+   * - Reward
+     - 任务成功、键盘标注或任务特定稠密反馈。
+   * - Prompt
+     - 使用 VLA 策略时由 env config 提供真机任务文本。
 
 硬件环境搭建
-----------------
+----------------------------------------
 
 真实世界实验需要如下硬件组件：
 
 - **机械臂**：Franka Emika Panda 机械臂。
-- **相机**：Intel RealSense 相机，用于采集 RGB 图像。
+- **相机**：Intel RealSense 相机（默认）或 Stereolabs ZED 相机。
+- **夹爪**：Franka 夹爪（默认）或 Robotiq 2F-85/2F-140。
 - **计算节点**：一台带有 GPU 的计算机，用于训练 CNN 策略。
 - **机器人控制节点**：一台与机械臂处于同一局域网的小型计算机（不需要 GPU），用于控制 Franka 机械臂。
 - **空间鼠标（可选）**：用于远程操控数据采集或在训练过程中进行人工干预。
+- **GELLO（可选）**：一种关节级遥操作设备，可替代空间鼠标，操控更直观，并原生支持夹爪控制。
+- **VR / PICO（可选）**：通过 PICO 头显和手柄进行 6D 末端遥操作，可替代空间鼠标进行数据采集。
 
 .. warning::
 
   请确保所有计算机均处于同一局域网络中。
   机械臂本体只需要与机器人控制节点处于同一局域网即可。
 
-依赖安装
--------------------------
+.. note::
+
+   **使用 ZED 相机或 Robotiq 夹爪？** 请参考专门的指南
+   :doc:`franka_zed_robotiq`，了解 SDK 安装、串口设备配置、
+   YAML 配置字段以及数据采集。
+
+   **使用 VR / PICO 遥操作？** 请参考 :doc:`franka_vr`，了解
+   XRoboToolkit、ZeroMQ、PICO wrapper 配置以及操作步骤。
+
+安装
+----------------------------------------
 
 控制节点与训练 / rollout 节点需要安装不同的软件依赖。
 
 机器人控制节点
-~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. 检查 Franka 固件版本
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 在机器人管理网页（一般为 ``http://<robot_ip>/desk``）中，点击 ``SETTINGS`` 选项卡，在 ``DashBoard`` 中查看 ``Control`` 后面的版本号，如下所示。
 请记录该固件版本号，后续步骤会用到。
@@ -108,35 +128,34 @@ Franka真机强化学习
 .. raw:: html
 
   <div style="flex: 1; text-align: center;">
-      <img src="https://github.com/RLinf/misc/blob/main/pic/franka_firmware.png?raw=true" style="width: 60%;"/>
+      <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/franka_firmware.png" style="width: 60%;"/>
   </div>
-
 .. warning::
 
   请确保 Franka 固件版本 ``<5.9.0`` 以保证与 serl_franka_controllers 的兼容性。
   推荐使用固件版本 5.7.2 以获得最佳兼容性。
 
 2. 实时内核安装
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 推荐在实时内核（Real-time Kernel）上运行 Franka 控制程序，以获得更好的实时性。
-请参考 `Franka 官方文档 <https://frankarobotics.github.io/docs/libfranka/docs/real_time_kernel.html>`_ 安装实时内核。
+请参考 `Franka 官方文档 <https://frankarobotics.github.io/docs/doc/libfranka/docs/real_time_kernel.html>`_ 安装实时内核。
 
 3. 依赖安装
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-a. 克隆 RLinf 仓库
-____________________
+A. 克隆 RLinf 仓库
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: bash
 
   # 为了提高国内下载速度，也可以使用：
-  # git clone https://ghfast.top/github.com/RLinf/RLinf.git
+  # git clone https://gh-proxy.com/github.com/RLinf/RLinf.git
   git clone https://github.com/RLinf/RLinf.git
   cd RLinf
 
-b. 安装依赖
-____________
+B. 安装依赖
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **方式 1：Docker 镜像**
 
@@ -151,9 +170,9 @@ ____________
     --network host \
     --name rlinf \
     -v .:/workspace/RLinf \
-    rlinf/rlinf:agentic-rlinf0.1-franka
+    rlinf/rlinf:agentic-rlinf0.4-franka
     # 为了提高国内下载速度，也可以使用：
-    # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.1-franka
+    # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.4-franka
 
 目前该 Docker 镜像包含 libfranka 版本 ``0.10.0``、``0.13.3``、``0.14.1``、``0.15.0`` 和 ``0.18.0``，以及 franka_ros 版本 ``0.10.0``。
 
@@ -213,20 +232,20 @@ ____________
   source .venv/bin/activate
 
 训练 / Rollout 节点
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-a. 克隆 RLinf 仓库
-^^^^^^^^^^^^^^^^^^^^^
+A. 克隆 RLinf 仓库
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: bash
 
   # 为了提高国内下载速度，也可以使用：
-  # git clone https://ghfast.top/github.com/RLinf/RLinf.git
+  # git clone https://gh-proxy.com/github.com/RLinf/RLinf.git
   git clone https://github.com/RLinf/RLinf.git
   cd RLinf
 
-b. 安装依赖
-^^^^^^^^^^^^^^^^^^^^^
+B. 安装依赖
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **方式 1：Docker 镜像**
 
@@ -239,9 +258,9 @@ b. 安装依赖
     --network host \
     --name rlinf \
     -v .:/workspace/RLinf \
-    rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+    rlinf/rlinf:agentic-rlinf0.4-maniskill_libero
     # 为了提高国内下载速度，也可以使用：
-    # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+    # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.4-maniskill_libero
 
 **方式 2：自定义环境（Custom Environment）**
 
@@ -254,8 +273,8 @@ b. 安装依赖
   bash requirements/install.sh embodied --model openvla --env maniskill_libero
   source .venv/bin/activate
 
-模型下载
----------------
+下载模型
+----------------------------------------
 
 在开始训练之前，需要先下载对应的预训练模型：
 
@@ -276,15 +295,15 @@ b. 安装依赖
 
 下载完成后，请在对应的配置 YAML 文件中正确填写模型路径。
 
-运行实验
------------------------
+运行
+----------------------------------------
 
 前置准备
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **获取任务的目标位姿**
 
-对于 Peg-insertion 任务，可以使用脚本 `toolkits.realworld_check.test_controller` 获取目标末端位姿。
+对于 Peg-insertion 任务，可以使用脚本 `toolkits.realworld_check.test_franka_controller` 获取目标末端位姿。
 
 首先，需要将 Franka 机器人切换到可编程模式，然后手动将机械臂移动到希望的目标位姿。
 
@@ -298,12 +317,12 @@ b. 安装依赖
 
 .. code-block:: bash
 
-   python -m toolkits.realworld_check.test_controller
+   python -m toolkits.realworld_check.test_franka_controller
 
 脚本会提示你输入命令，可以输入 `getpos_euler` 来获取当前末端执行器以欧拉角形式表示的位姿。
 
 数据采集
-~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 对于 RLPD 实验，需要先在控制节点上收集一部分初始数据，
 该过程只需在控制节点上运行，不需要其他节点参与。
@@ -357,8 +376,52 @@ b. 安装依赖
 
 5. 数据采集完成后，可以将收集到的数据上传到训练 / rollout 节点。
 
-集群配置
-~~~~~~~~~~~~~~~~~
+.. note::
+
+   **使用 ZED 相机和 Robotiq 夹爪？** 我们提供了专用的数据采集脚本和配置文件。
+   请参考 :doc:`franka_zed_robotiq` 中的
+   :ref:`数据采集 <franka-zed-robotiq-data-collection-zh>` 章节。
+
+使用 GELLO 进行数据采集
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+除空间鼠标外，RLinf 还支持使用 `GELLO <https://github.com/wuphilipp/gello_software>`_ 进行遥操作数据采集。
+GELLO 是一种关节级遥操作设备，其运动学结构与 Franka 机械臂一致，操控更直观、精确，并原生支持夹爪控制。
+
+**前置条件**
+
+- 安装 ``gello`` 和 ``gello-teleop`` 软件包。详细安装说明请参考 :doc:`franka_gello`。
+- GELLO 设备通过 USB 串口连接到控制节点。
+- 确认 GELLO 串口路径（例如 ``/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA0OUKN-if00-port0``）。
+  可通过以下命令列出可用串口：
+
+  .. code-block:: bash
+
+     ls /dev/serial/by-id/
+
+**配置**
+
+使用配置文件 ``examples/embodiment/config/realworld_collect_data_gello.yaml``。
+与空间鼠标配置的关键区别如下：
+
+.. code-block:: yaml
+
+   env:
+     eval:
+       use_spacemouse: False
+       use_gello: True
+       gello_port: "/dev/serial/by-id/usb-FTDI_..."  # 替换为你的 GELLO 串口路径
+
+**运行**
+
+.. code-block:: bash
+
+   bash examples/embodiment/collect_data.sh realworld_collect_data_gello
+
+整体流程与空间鼠标采集相同：使用 GELLO 设备操控机器人完成任务，脚本会自动保存成功的 episode。
+
+集群设置
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 在正式开始实验之前，需要先正确地搭建 ray 集群。
 
@@ -375,9 +438,9 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
 该脚本主要负责以下内容：
 
 1. 在使用自定义环境安装方式时，source 正确的虚拟环境，请参考依赖安装部分的说明；
-   
+
 2. 在控制节点上，source franka_ros 与 serl_franka_controllers 的 setup 脚本（通常位于 ``<your_catkin_ws>/devel/setup.bash``），**如果你使用的是 docker 镜像或安装脚本，则在 source 虚拟 Python 环境时已经完成此操作**；
-   
+
 3. 在所有节点上设置 RLinf 相关环境变量：
 
 .. code-block:: bash
@@ -407,7 +470,7 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
 可以通过执行 `ray status` 来检查集群是否已正确启动。
 
 配置文件
-~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 正式运行实验前，需要根据实际集群与机器人设置修改配置文件
 ``examples/embodiment/config/realworld_peginsertion_rlpd_cnn_async.yaml``。
@@ -417,8 +480,50 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
 接着，在 ``rollout`` 与 ``actor`` 部分，将 ``model_path`` 字段修改为前面下载好的预训练模型路径；
 同时，将 ``data.path`` 字段设置为你上传 demo 数据的位置。
 
+无显示器键盘奖励包装器（可选）
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+如果你希望通过人工使用物理键盘给奖励打标，可以在 real-world env 配置中启用键盘包装器。
+
+例如，在 ``examples/embodiment/config/realworld_peginsertion_rlpd_cnn_async.yaml`` 中加入：
+
+.. code-block:: yaml
+
+   env:
+     train:
+       keyboard_reward_wrapper: single_stage  # 或 multi_stage
+
+可用模式如下：
+
+- ``single_stage``：按 ``a`` 记失败奖励，按 ``b`` 记中性奖励，按 ``c`` 记成功奖励。
+- ``multi_stage``：按 ``a`` / ``b`` / ``c`` 在不同奖励阶段之间切换，按 ``q`` 输出负奖励。
+
+新的键盘监听器会直接读取 Linux 输入设备，因此需要在控制节点上、执行 ``ray start`` 之前导出 ``RLINF_KEYBOARD_DEVICE``。
+
+首先，查看当前机器上的键盘设备：
+
+.. code-block:: bash
+
+   ls -l /dev/input/by-id/*-event-kbd
+
+该命令会显示稳定的键盘名称以及其对应的 ``eventX`` 设备。例如，``usb-Logitech_USB_Keyboard-event-kbd -> ../event20`` 表示对应的键盘设备是 ``/dev/input/event20``。
+
+开始训练前，先给该 event 设备开放访问权限：
+
+.. code-block:: bash
+
+   chmod 666 /dev/input/event20
+
+然后在启动 ``ray`` 之前，于 shell 或 setup 脚本中导出这个 event 设备：
+
+.. code-block:: bash
+
+   export RLINF_KEYBOARD_DEVICE=/dev/input/event20
+
+如果你使用的是 ``ray_utils/realworld/setup_before_ray.sh``，建议在控制节点的该脚本中加入这条 ``export``，确保 ray 启动的 env 进程能够继承这个环境变量。
+
 检查环境（可选）
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 在启动正式实验前，我们推荐先通过若干测试脚本验证整体环境配置是否正确。
 
@@ -426,11 +531,11 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
 
 .. code-block:: bash
 
-   python -m toolkits.realworld_check.test_camera
+   python -m toolkits.realworld_check.test_franka_camera
 
-然后，通过运行一个 dummy 版本配置来测试基础集群配置。请参照``examples/embodiment/config/real_world_dummy_sac_cnn.yaml``文件添加`env.eval.override_cfg`。
+然后，通过运行一个 dummy 版本配置来测试基础集群配置。请参照``examples/embodiment/config/realworld_dummy_franka_sac_cnn.yaml``文件添加`env.eval.override_cfg`。
 可以在配置文件中同时将 `env.train.override_cfg` 与 `env.eval.override_cfg` 部分的 `is_dummy` 字段设置为 `True`，
-以启用 dummy 模式。请注意如果启用dummy模式，需要将上面运行 ``toolkits.realworld_check.test_camera.py`` 得到的camera序列号
+以启用 dummy 模式。请注意如果启用dummy模式，需要将上面运行 ``toolkits.realworld_check.test_franka_camera.py`` 得到的camera序列号
 填补在 `env.train.override_cfg` 与 `env.eval.override_cfg` 部分的 `camera_serials` 字段。
 
 在 head 节点上运行测试脚本：
@@ -439,8 +544,8 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
 
    bash examples/embodiment/run_realworld_async.sh realworld_peginsertion_rlpd_cnn_async
 
-运行实验
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+运行
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 在完成上述检查之后，即可在 head 节点上启动真实世界训练实验：
 
@@ -449,7 +554,7 @@ RLinf 使用 ray 来管理分布式环境，这意味着：
    bash examples/embodiment/run_realworld_async.sh realworld_peginsertion_rlpd_cnn_async
 
 进阶：多机器人配置
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采集与训练。
 要启用多机器人设置，需要在配置文件的 `node_groups` 部分为每个机器人添加独立的配置。
@@ -462,7 +567,7 @@ RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采
   cluster:
   num_nodes: 3 # 1 个训练 / rollout 节点 + 2 个机器人控制节点
   component_placement:
-    actor: 
+    actor:
       node_group: "4090"
       placement: 0 # 运行在训练 / rollout 节点的第一个 GPU 上
     env:
@@ -485,12 +590,14 @@ RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采
             node_rank: 2 # 第二个机器人控制节点的 rank
 
 自然地，你可以按照同样的方式扩展到更多的机器人。
-关于此类异构硬件配置语法的更多细节，请参考 :doc:`../../tutorials/advance/hetero`。
+关于此类异构硬件配置语法的更多细节，请参考 :doc:`../../guides/hetero`。
+
+如需在真机上通过与动作块执行重叠来隐藏策略推理延迟，请参考 :doc:`RTC <../../guides/rtc>`。
 
 
 
 可视化与结果
--------------------------
+----------------------------------------
 
 **1. TensorBoard 日志**
 
@@ -529,13 +636,13 @@ RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采
   - ``train/replay_buffer/utilization``: 重放缓冲区的利用率
 
 真实世界结果
-~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 以下提供了插块插入任务和充电器任务的演示视频和训练曲线。在 1 小时的训练时间内，机器人能够学习到一套能够持续成功完成任务的策略。
 
 .. raw:: html
 
   <div style="flex: 0.8; text-align: center;">
-      <img src="https://github.com/RLinf/misc/raw/main/pic/realworld-curve.png" style="width: 100%;"/>
+      <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/realworld-curve.png" style="width: 100%;"/>
       <p><em>训练曲线</em></p>
     </div>
 
@@ -543,7 +650,7 @@ RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采
 
   <div style="flex: 1; text-align: center;">
     <video controls autoplay loop muted playsinline preload="metadata" width="720">
-      <source src="https://github.com/RLinf/misc/raw/main/pic/peg-insertion-compressed.mp4" type="video/mp4">
+      <source src="https://raw.githubusercontent.com/RLinf/misc/main/pic/peg-insertion-compressed.mp4" type="video/mp4">
       Your browser does not support the video tag.
     </video>
     <p><em>插块插入（Peg Insertion）</em></p>
@@ -553,7 +660,7 @@ RLinf 支持对多台 Franka 机器人进行统一管理，实现并行数据采
 
   <div style="flex: 1; text-align: center;">
     <video controls autoplay loop muted playsinline preload="metadata" width="720">
-      <source src="https://github.com/RLinf/misc/raw/main/pic/charger-compressed.mp4" type="video/mp4">
+      <source src="https://raw.githubusercontent.com/RLinf/misc/main/pic/charger-compressed.mp4" type="video/mp4">
       Your browser does not support the video tag.
     </video>
     <p><em>充电器插电（Charger）</em></p>

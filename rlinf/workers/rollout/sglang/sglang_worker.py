@@ -26,11 +26,8 @@ from sglang.srt.server_args import ServerArgs
 from transformers import AutoTokenizer
 
 from rlinf.config import torch_dtype_from_precision
-from rlinf.data.io_struct import (
-    RolloutRequest,
-    RolloutResult,
-    SeqGroupInfo,
-)
+from rlinf.data.schema.reasoning_requests import RolloutRequest, SeqGroupInfo
+from rlinf.data.schema.reasoning_results import RolloutResult
 from rlinf.scheduler import Channel, Worker
 from rlinf.scheduler.dynamic_scheduler.manager import RolloutScalingScheduler
 from rlinf.scheduler.dynamic_scheduler.utils import (
@@ -67,7 +64,8 @@ class SGLangWorker(Worker):
         self._placement = placement
 
         self._tokenizer = AutoTokenizer.from_pretrained(
-            self._cfg_rollout.model.model_path
+            self._cfg_rollout.model.model_path,
+            trust_remote_code=self._cfg_rollout.model.trust_remote_code,
         )
         self._return_logprobs = self._cfg_rollout.return_logprobs
         sampling_params = None
@@ -149,9 +147,14 @@ class SGLangWorker(Worker):
 
         load_format = "dummy"  # dummy means randomize init weight
         if self.weight_reload == "sync":
-            if self._cfg_rollout.validate_weight or getattr(
-                self._cfg_rollout, "validate_weight_first_sync", False
-            ):
+            validate_weight_first_sync = self._cfg_rollout.get(
+                "validate_weight_first_sync", False
+            )
+            if self._cfg.runner.resume_dir is not None:
+                # validate_weight_first_sync compare hf weights with megatron weights,
+                # and if resume_dir is enabled, hf weights can't equal to megatron's.
+                validate_weight_first_sync = False
+            if self._cfg_rollout.validate_weight or validate_weight_first_sync:
                 load_format = "auto"
         else:
             load_format = "auto"
@@ -164,6 +167,12 @@ class SGLangWorker(Worker):
                 self._cfg_rollout.max_running_requests,
             ),
             tp_size=self._cfg_rollout.tensor_parallel_size,
+            # sglang >=0.5.11 drops the `enable_ep_moe` flag and enables EP via ep_size > 1.
+            ep_size=(
+                self._cfg_rollout.tensor_parallel_size
+                if self._cfg_rollout.sglang.get("enable_ep_moe", False)
+                else 1
+            ),
             mem_fraction_static=self._cfg_rollout.gpu_memory_utilization,
             enable_memory_saver=use_cudagraph,
             enable_torch_compile=self._cfg_rollout.sglang.use_torch_compile,
@@ -183,6 +192,8 @@ class SGLangWorker(Worker):
             log_level="info",
             max_running_requests=self._cfg_rollout.max_running_requests,
             dist_init_addr=f"127.0.0.1:{str(self.acquire_free_port())}",
+            tool_call_parser=self._cfg_rollout.sglang.get("tool_call_parser", None),
+            trust_remote_code=self._cfg_rollout.model.trust_remote_code,
         )
 
         self.log_on_first_rank(f"{server_args=}")

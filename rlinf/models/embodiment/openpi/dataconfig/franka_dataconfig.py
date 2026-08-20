@@ -36,7 +36,10 @@ class CustomDataConfig(DataConfigFactory):
     # Finally we will use delta actions to train, but we can input abs_action(get delta for training via abs_action-state) or delta_action(no other process)
     extra_delta_transform: bool = True  # False for additional process(abs_action - state) to get delta action for training
     # train actions using rotation_6d
-    action_train_with_rotation_6d: bool = False
+    # If action dim is not 7 (e.g. without gripper control), should change this
+    output_action_dim: int = 7
+    # Keep Pi0.5 discrete state prompts at the raw dataset state dimension.
+    pad_state: bool = True
 
     def generate_observations(
         image: np.ndarray, state: np.ndarray, prompt: str
@@ -70,13 +73,11 @@ class CustomDataConfig(DataConfigFactory):
                 franka_policy.FrankaEEInputs(
                     action_dim=model_config.action_dim,
                     model_type=model_config.model_type,
-                    action_train_with_rotation_6d=self.action_train_with_rotation_6d,
+                    pad_state=self.pad_state,
                 )
             ],
             outputs=[
-                franka_policy.FrankaEEOutputs(
-                    action_train_with_rotation_6d=self.action_train_with_rotation_6d
-                )
+                franka_policy.FrankaEEOutputs(output_action_dim=self.output_action_dim)
             ],
         )
 

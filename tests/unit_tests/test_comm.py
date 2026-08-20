@@ -14,13 +14,17 @@
 
 import asyncio
 import gc
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
+from torch.distributed import distributed_c10d
 
 from rlinf.scheduler import (
     Cluster,
@@ -30,11 +34,34 @@ from rlinf.scheduler import (
     Worker,
     WorkerAddress,
 )
+from rlinf.scheduler.collective.collective_group import CollectiveGroup
+from rlinf.scheduler.collective.multi_channel_pg import MultiChannelProcessGroup
 
 SENDER_GROUP_NAME = "sender_worker_group"
 RECEIVER_GROUP_NAME = "receiver_worker_group"
 
 # --- Helper Functions ---
+
+
+def accelerator_is_available():
+    """Return whether the Worker accelerator backend is available."""
+    return (
+        Worker.torch_platform is not None
+        and hasattr(Worker.torch_platform, "is_available")
+        and Worker.torch_platform.is_available()
+    )
+
+
+def accelerator_device_count():
+    """Return accelerator count through the Worker backend abstraction."""
+    if Worker.torch_platform is None or not hasattr(
+        Worker.torch_platform, "device_count"
+    ):
+        return 0
+    return Worker.torch_platform.device_count()
+
+
+ACCELERATOR_DEVICE_TYPE = Worker.torch_device_type or "accelerator"
 
 
 @dataclass
@@ -75,9 +102,12 @@ class PlainMessage:
 
 def get_device():
     """Returns the appropriate torch device."""
-    if torch.cuda.is_available():
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    return torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+    if accelerator_is_available():
+        Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
+        return torch.device(
+            f"{Worker.torch_device_type}:{Worker.torch_platform.current_device()}"
+        )
+    return "cpu"
 
 
 def get_send_peer_rank(rank, world_size):
@@ -94,7 +124,7 @@ NON_CONTIGUOUS_ERR = "must be contiguous when using P2P communication"
 
 
 def make_non_contiguous_tensor(device):
-    """Returns a non-contiguous CUDA tensor (e.g. from .t())."""
+    """Returns a non-contiguous accelerator tensor (e.g. from .t())."""
     t = torch.ones(2, 3, device=device)
     return t.t()  # transpose is non-contiguous
 
@@ -105,13 +135,13 @@ class SenderWorker(Worker):
 
     def __init__(self):
         super().__init__()
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
 
     def _send_data(self, data, async_op, use_send_tensor=False):
         """Generic data sending method."""
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
         peer_rank = get_send_peer_rank(self._rank, self._world_size)
         if use_send_tensor:
             work = self.send_tensor(
@@ -134,8 +164,8 @@ class SenderWorker(Worker):
         """Generic data sending method using asyncio."""
 
         async def _send():
-            if torch.cuda.is_available():
-                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            if accelerator_is_available():
+                Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
             data = data_factory()
             peer_rank = get_send_peer_rank(self._rank, self._world_size)
             if use_send_tensor:
@@ -177,8 +207,8 @@ class SenderWorker(Worker):
         return self._send_data(tensor_dict, async_op)
 
     def test_send_mixed_tensor_list(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         tensor_list = [
             torch.ones(2, 2, device="cpu") * (self._rank + 1),
@@ -188,8 +218,8 @@ class SenderWorker(Worker):
         return self._send_data(tensor_list, async_op)
 
     def test_send_mixed_tensor_dict(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         tensor_dict = {
             "cpu_a": torch.ones(2, 2, device="cpu") * (self._rank + 1),
@@ -199,8 +229,8 @@ class SenderWorker(Worker):
         return self._send_data(tensor_dict, async_op)
 
     def test_send_mixed_tensor_list_dataclass(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         payload_list = [
             torch.ones(2, 2, device="cpu") * (self._rank + 1),
@@ -215,8 +245,8 @@ class SenderWorker(Worker):
         return self._send_data(msg, async_op)
 
     def test_send_mixed_tensor_dict_dataclass(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         payload_dict = {
             "cpu_a": torch.ones(2, 2, device="cpu") * (self._rank + 1),
@@ -454,8 +484,8 @@ class SenderWorker(Worker):
 
         large_tensor = None
         gc.collect()
-        torch.cuda.empty_cache()
-        assert torch.cuda.memory_allocated() == 0
+        Worker.torch_platform.empty_cache()
+        assert Worker.torch_platform.memory_allocated() == 0
         return True
 
 
@@ -464,14 +494,14 @@ class ReceiverWorker(Worker):
 
     def __init__(self):
         super().__init__()
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
 
     def _recv_data(self, async_op, recv_tensor_inplace_shape=None):
         """Generic data receiving method."""
         peer_rank = get_recv_peer_rank(self._rank, self._world_size)
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
         if recv_tensor_inplace_shape:
             on_cpu, shape = recv_tensor_inplace_shape
             device = "cpu" if on_cpu else get_device()
@@ -497,8 +527,8 @@ class ReceiverWorker(Worker):
         """Generic data receiving method using asyncio."""
 
         async def _recv():
-            if torch.cuda.is_available():
-                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            if accelerator_is_available():
+                Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
             peer_rank = get_recv_peer_rank(self._rank, self._world_size)
             if recv_tensor_inplace_shape:
                 on_cpu, shape = recv_tensor_inplace_shape
@@ -625,8 +655,8 @@ class ReceiverWorker(Worker):
 
         recv_tensor = None
         gc.collect()
-        torch.cuda.empty_cache()
-        assert torch.cuda.memory_allocated() == 0
+        Worker.torch_platform.empty_cache()
+        assert Worker.torch_platform.memory_allocated() == 0
 
     async def test_async_wait_yields_control(self):
         """Run recv(async_op=True) and await async_wait() concurrently with another
@@ -660,12 +690,12 @@ class CommCollectiveWorker(Worker):
 
     def __init__(self):
         super().__init__()
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
 
     def _broadcast_data(self, data, async_op):
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if accelerator_is_available():
+            Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
         groups = [(self._group_name, list(range(self._world_size)))]
         payload = data if self._rank == 0 else None
         result = self.broadcast(payload, groups=groups, async_op=async_op)
@@ -696,8 +726,8 @@ class CommCollectiveWorker(Worker):
         return self._broadcast_data(payload, async_op)
 
     def test_broadcast_mixed_tensor_list(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         payload = (
             [
@@ -711,8 +741,8 @@ class CommCollectiveWorker(Worker):
         return self._broadcast_data(payload, async_op)
 
     def test_broadcast_mixed_tensor_list_dataclass(self, async_op=False):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for mixed CPU/GPU tensor tests.")
+        if not accelerator_is_available():
+            raise RuntimeError("Accelerator is required for mixed tensor tests.")
         cuda_device = get_device()
         payload = (
             TensorListMessage(
@@ -777,8 +807,8 @@ class CommCollectiveWorker(Worker):
 
     async def test_broadcast_tensor_asyncio(self, on_cpu):
         async def _broadcast():
-            if torch.cuda.is_available():
-                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            if accelerator_is_available():
+                Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
             device = "cpu" if on_cpu else get_device()
             groups = [(self._group_name, list(range(self._world_size)))]
             payload = torch.ones(3, 3, device=device) * 5
@@ -792,8 +822,8 @@ class CommCollectiveWorker(Worker):
 
     async def test_cross_group_broadcast_tensor_asyncio(self, groups, on_cpu):
         async def _broadcast():
-            if torch.cuda.is_available():
-                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            if accelerator_is_available():
+                Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
             device = "cpu" if on_cpu else get_device()
             src_group_name, src_ranks = groups[0]
             if isinstance(src_ranks, list):
@@ -906,8 +936,8 @@ class CommCollectiveWorker(Worker):
 
     async def test_broadcast_tensor_dataclass_asyncio(self, on_cpu):
         async def _broadcast():
-            if torch.cuda.is_available():
-                torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            if accelerator_is_available():
+                Worker.torch_platform.set_device(int(os.environ["LOCAL_RANK"]))
             device = "cpu" if on_cpu else get_device()
             groups = [(self._group_name, list(range(self._world_size)))]
             payload = TensorMessage(
@@ -939,11 +969,21 @@ def cluster():
 def worker_groups(cluster: Cluster):
     """Creates and yields the sender and receiver worker groups."""
     if cluster.num_accelerators > 0:
+        if cluster.num_accelerators < 4:
+            pytest.skip(
+                f"NPU send/recv tests require at least 4 accelerator devices, "
+                f"found {cluster.num_accelerators}."
+            )
+        half = cluster.num_accelerators // 2
+        sender_placement = PackedPlacementStrategy(0, half - 1)
+        receiver_placement = PackedPlacementStrategy(half, cluster.num_accelerators - 1)
         sender_group = SenderWorker.create_group().launch(
-            cluster=cluster, name=SENDER_GROUP_NAME
+            cluster=cluster, placement_strategy=sender_placement, name=SENDER_GROUP_NAME
         )
         receiver_group = ReceiverWorker.create_group().launch(
-            cluster=cluster, name=RECEIVER_GROUP_NAME
+            cluster=cluster,
+            placement_strategy=receiver_placement,
+            name=RECEIVER_GROUP_NAME,
         )
     else:
         placement = NodePlacementStrategy([0] * 8)
@@ -962,8 +1002,19 @@ def worker_groups(cluster: Cluster):
 def collective_group(cluster: Cluster):
     """Creates and yields the collective worker group."""
     if cluster.num_accelerators > 0:
+        # cross_collective_groups occupies the lower devices (0..cross_size-1) and is
+        # alive at the same time as this fixture within TestCollective. Place
+        # collective workers on the upper devices to avoid HCCL conflicts.
+        cross_size = 4 if cluster.num_accelerators > 4 else 2
+        if cluster.num_accelerators <= cross_size:
+            pytest.skip(
+                f"collective_group requires more than {cross_size} accelerator devices "
+                f"so it can run alongside cross_collective_groups without sharing devices. "
+                f"Found {cluster.num_accelerators}."
+            )
+        placement = PackedPlacementStrategy(cross_size, cluster.num_accelerators - 1)
         group = CommCollectiveWorker.create_group().launch(
-            cluster=cluster, name="collective_group"
+            cluster=cluster, placement_strategy=placement, name="collective_group"
         )
     else:
         placement = NodePlacementStrategy([0] * 8)
@@ -977,10 +1028,10 @@ def collective_group(cluster: Cluster):
 @pytest.fixture(scope="class")
 def cross_collective_groups(cluster: Cluster):
     """Creates and yields two collective worker groups for cross-group tests."""
-    if torch.cuda.is_available():
+    if accelerator_is_available():
         if cluster.num_accelerators < 2:
             pytest.skip("Skipping cross-group tests with insufficient accelerators.")
-        if cluster.num_accelerators >= 4:
+        if cluster.num_accelerators > 4:
             group_a_size = 2
             group_b_size = 2
         else:
@@ -1061,12 +1112,14 @@ class TestCommunication:
             assert res.name == f"rank_{peer_rank}"
             assert res.value == pytest.approx(3.14 * (peer_rank + 1))
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a single tensor."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor",
@@ -1079,12 +1132,14 @@ class TestCommunication:
             expected = torch.ones(2, 2) * peer_rank
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_list_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a list of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_list",
@@ -1100,8 +1155,8 @@ class TestCommunication:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_mixed_tensor_list_communication(self, worker_groups, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_mixed_tensor_list",
@@ -1112,7 +1167,7 @@ class TestCommunication:
         for i, res_list in enumerate(results):
             peer_rank = get_recv_peer_rank(i, len(results))
             expected_vals = [peer_rank + 1, peer_rank + 2, peer_rank + 3]
-            expected_devices = ["cpu", "cuda", "cpu"]
+            expected_devices = ["cpu", Worker.torch_device_type, "cpu"]
             for tensor, expected_val, expected_device in zip(
                 res_list, expected_vals, expected_devices
             ):
@@ -1121,8 +1176,8 @@ class TestCommunication:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_mixed_tensor_dict_communication(self, worker_groups, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_mixed_tensor_dict",
@@ -1133,7 +1188,7 @@ class TestCommunication:
         for i, res_dict in enumerate(results):
             peer_rank = get_recv_peer_rank(i, len(results))
             assert res_dict["cpu_a"].device.type == "cpu"
-            assert res_dict["cuda_b"].device.type == "cuda"
+            assert res_dict["cuda_b"].device.type == Worker.torch_device_type
             assert res_dict["cpu_c"].device.type == "cpu"
             assert torch.equal(
                 res_dict["cpu_a"].cpu(), torch.ones(2, 2) * (peer_rank + 1)
@@ -1147,8 +1202,8 @@ class TestCommunication:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_mixed_tensor_list_dataclass_communication(self, worker_groups, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_mixed_tensor_list_dataclass",
@@ -1162,7 +1217,7 @@ class TestCommunication:
             assert res.id == peer_rank
             assert res.note == f"mixed list from rank {peer_rank}"
             expected_vals = [peer_rank + 1, peer_rank + 2, peer_rank + 3]
-            expected_devices = ["cpu", "cuda", "cpu"]
+            expected_devices = ["cpu", Worker.torch_device_type, "cpu"]
             for tensor, expected_val, expected_device in zip(
                 res.payload_list, expected_vals, expected_devices
             ):
@@ -1171,8 +1226,8 @@ class TestCommunication:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_mixed_tensor_dict_dataclass_communication(self, worker_groups, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_mixed_tensor_dict_dataclass",
@@ -1186,7 +1241,7 @@ class TestCommunication:
             assert res.id == peer_rank
             assert res.note == f"mixed dict from rank {peer_rank}"
             assert res.payload_dict["cpu_a"].device.type == "cpu"
-            assert res.payload_dict["cuda_b"].device.type == "cuda"
+            assert res.payload_dict["cuda_b"].device.type == Worker.torch_device_type
             assert res.payload_dict["cpu_c"].device.type == "cpu"
             assert torch.equal(
                 res.payload_dict["cpu_a"].cpu(), torch.ones(2, 2) * (peer_rank + 1)
@@ -1198,12 +1253,14 @@ class TestCommunication:
                 res.payload_dict["cpu_c"].cpu(), torch.ones(2, 2) * (peer_rank + 3)
             )
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_dict_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a dictionary of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_dict",
@@ -1218,12 +1275,14 @@ class TestCommunication:
                 expected = torch.ones(2, 2) * i
                 assert torch.equal(res_dict[key].cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_inplace_tensor_communication(self, worker_groups, on_cpu, async_op):
         """Tests send_tensor/recv_tensor for in-place tensor communication."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_inplace",
@@ -1236,12 +1295,14 @@ class TestCommunication:
             expected = torch.ones(3, 3) * peer_rank
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_dataclass_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a dataclass containing torch tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_dataclass",
@@ -1256,12 +1317,14 @@ class TestCommunication:
             assert res.note == f"from rank {peer_rank}"
             assert torch.equal(res.payload.cpu(), torch.ones(2, 2) * peer_rank)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_list_dataclass_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a dataclass containing a list of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_list_dataclass",
@@ -1279,12 +1342,14 @@ class TestCommunication:
                 expected = torch.ones(2, 2) * (peer_rank * 10 + j)
                 assert torch.equal(t.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_tensor_dict_dataclass_communication(self, worker_groups, on_cpu, async_op):
         """Tests sending and receiving a dataclass containing a dict of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_dict_dataclass",
@@ -1302,11 +1367,13 @@ class TestCommunication:
                 expected = torch.ones(2, 2) * (peer_rank * 10 + j)
                 assert torch.equal(res.payload_dict[key].cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_asyncio_communication(self, worker_groups, on_cpu):
         """Tests async communication with asyncio.run and async_wait."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_asyncio",
@@ -1319,11 +1386,13 @@ class TestCommunication:
             expected = torch.ones(4, 4) * peer_rank
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_tensor_dataclass_asyncio_communication(self, worker_groups, on_cpu):
         """Tests async send/recv of dataclass containing torch tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_dataclass_asyncio",
@@ -1338,11 +1407,13 @@ class TestCommunication:
             assert res.note == f"async from rank {peer_rank}"
             assert torch.equal(res.payload.cpu(), torch.ones(4, 4) * peer_rank)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_tensor_list_dataclass_asyncio_communication(self, worker_groups, on_cpu):
         """Tests async send/recv of dataclass containing list of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_list_dataclass_asyncio",
@@ -1359,11 +1430,13 @@ class TestCommunication:
             for j, t in enumerate(res.payload_list):
                 assert torch.equal(t.cpu(), torch.ones(2, 2) * (peer_rank * 10 + j))
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_tensor_dict_dataclass_asyncio_communication(self, worker_groups, on_cpu):
         """Tests async send/recv of dataclass containing dict of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_send_tensor_dict_dataclass_asyncio",
@@ -1382,11 +1455,13 @@ class TestCommunication:
                     torch.ones(2, 2) * (peer_rank * 10 + j),
                 )
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_unaligned_send_recv(self, worker_groups, on_cpu):
         """Tests unaligned sending and receiving of tensors."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_unaligned_send_recv",
@@ -1398,11 +1473,13 @@ class TestCommunication:
             expected = torch.ones(5, 5) * get_recv_peer_rank(i, len(results))
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_consecutive_send_recv(self, worker_groups, on_cpu):
         """Tests sending and receiving tensors in a consecutive manner."""
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_test(
             worker_groups,
             "test_consecutive_send_recv",
@@ -1416,8 +1493,8 @@ class TestCommunication:
 
     def test_memory_leak(self, worker_groups):
         """Tests unaligned sending and receiving of tensors."""
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         self._run_test(
             worker_groups,
             "test_memory_leak",
@@ -1459,8 +1536,8 @@ class TestCommunication:
         ],
     )
     def test_non_contiguous_send_raises_value_error(self, worker_groups, sender_method):
-        """Sending non-contiguous CUDA tensors (any struct) must raise ValueError."""
-        if not torch.cuda.is_available():
+        """Sending non-contiguous accelerator tensors (any struct) must raise ValueError."""
+        if not accelerator_is_available():
             pytest.skip("Skipping non-contiguous tests on CPU-only environment.")
         sender_group, _ = worker_groups
         results = getattr(sender_group.execute_on(0), sender_method)().wait()
@@ -1501,11 +1578,13 @@ class TestCollective:
             assert res.name == "broadcast_src"
             assert res.value == pytest.approx(2.71)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor", on_cpu, async_op
         )
@@ -1513,11 +1592,13 @@ class TestCollective:
         for res in results:
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_list(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor_list", on_cpu, async_op
         )
@@ -1529,13 +1610,13 @@ class TestCollective:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_mixed_tensor_list(self, collective_group, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_mixed_tensor_list", async_op
         )
         expected_vals = [1, 2, 3]
-        expected_devices = ["cpu", "cuda", "cpu"]
+        expected_devices = ["cpu", Worker.torch_device_type, "cpu"]
         for res_list in results:
             for tensor, expected_val, expected_device in zip(
                 res_list, expected_vals, expected_devices
@@ -1545,13 +1626,13 @@ class TestCollective:
 
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_mixed_tensor_list_dataclass(self, collective_group, async_op):
-        if not torch.cuda.is_available():
-            pytest.skip("Skipping mixed CPU/GPU test on CPU-only environment.")
+        if not accelerator_is_available():
+            pytest.skip("Skipping mixed tensor test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_mixed_tensor_list_dataclass", async_op
         )
         expected_vals = [1, 2, 3]
-        expected_devices = ["cpu", "cuda", "cpu"]
+        expected_devices = ["cpu", Worker.torch_device_type, "cpu"]
         for res in results:
             assert isinstance(res, TensorListMessage)
             assert res.id == 0
@@ -1562,11 +1643,13 @@ class TestCollective:
                 assert tensor.device.type == expected_device
                 assert torch.equal(tensor.cpu(), torch.ones(2, 2) * expected_val)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_dict(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor_dict", on_cpu, async_op
         )
@@ -1577,11 +1660,13 @@ class TestCollective:
                 expected = torch.ones(2, 2) * i
                 assert torch.equal(res_dict[key].cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_dataclass(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor_dataclass", on_cpu, async_op
         )
@@ -1592,11 +1677,13 @@ class TestCollective:
             assert res.note == "broadcast from rank 0"
             assert torch.equal(res.payload.cpu(), expected_payload)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_list_dataclass(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group,
             "test_broadcast_tensor_list_dataclass",
@@ -1611,11 +1698,13 @@ class TestCollective:
             for i, t in enumerate(res.payload_list):
                 assert torch.equal(t.cpu(), torch.ones(2, 2) * i)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_dict_dataclass(self, collective_group, on_cpu, async_op):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group,
             "test_broadcast_tensor_dict_dataclass",
@@ -1643,13 +1732,15 @@ class TestCollective:
         for res in results:
             assert res == {"message": "Hello from cross-group src", "rank": 0}
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_cross_group_broadcast_tensor(
         self, cross_collective_groups, on_cpu, async_op
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         group_a, group_b, group_a_size, group_b_size = cross_collective_groups
         groups = [
             ("collective_group_a", list(range(group_a_size))),
@@ -1662,13 +1753,15 @@ class TestCollective:
         for res in results:
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_cross_group_broadcast_tensor_dataclass(
         self, cross_collective_groups, on_cpu, async_op
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         group_a, group_b, group_a_size, group_b_size = cross_collective_groups
         groups = [
             ("collective_group_a", list(range(group_a_size))),
@@ -1716,13 +1809,15 @@ class TestCollective:
         results_b = handle_a.wait() + handle_b.wait()
         assert results_a == results_b
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_src_tensor_order_independent(
         self, cross_collective_groups, on_cpu, async_op
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         group_a, group_b, group_a_size, group_b_size = cross_collective_groups
         groups_a_first = [
             ("collective_group_a", list(range(group_a_size))),
@@ -1751,13 +1846,15 @@ class TestCollective:
         for res in results_a + results_b:
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     @pytest.mark.parametrize("async_op", [False, True], ids=["sync", "async_wait"])
     def test_broadcast_tensor_dataclass_with_src(
         self, cross_collective_groups, on_cpu, async_op
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         group_a, group_b, group_a_size, group_b_size = cross_collective_groups
         groups_a_first = [
             ("collective_group_a", list(range(group_a_size))),
@@ -1789,10 +1886,12 @@ class TestCollective:
             assert res.note == "broadcast with src"
             assert torch.equal(res.payload.cpu(), expected_payload)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_collective_asyncio_broadcast(self, collective_group, on_cpu):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor_asyncio", on_cpu
         )
@@ -1800,12 +1899,14 @@ class TestCollective:
         for res in results:
             assert torch.equal(res.cpu(), expected)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_collective_asyncio_broadcast_tensor_dataclass(
         self, collective_group, on_cpu
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         results = self._run_collective_test(
             collective_group, "test_broadcast_tensor_dataclass_asyncio", on_cpu
         )
@@ -1816,12 +1917,14 @@ class TestCollective:
             assert res.note == "async broadcast from rank 0"
             assert torch.equal(res.payload.cpu(), expected_payload)
 
-    @pytest.mark.parametrize("on_cpu", [True, False], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "on_cpu", [True, False], ids=["cpu", ACCELERATOR_DEVICE_TYPE]
+    )
     def test_collective_asyncio_cross_group_broadcast(
         self, cross_collective_groups, on_cpu
     ):
-        if not on_cpu and not torch.cuda.is_available():
-            pytest.skip("Skipping CUDA test on CPU-only environment.")
+        if not on_cpu and not accelerator_is_available():
+            pytest.skip("Skipping accelerator test without an accelerator.")
         group_a, group_b, group_a_size, group_b_size = cross_collective_groups
         groups = [
             ("collective_group_a", list(range(group_a_size))),
@@ -1833,6 +1936,113 @@ class TestCollective:
         expected = torch.ones(3, 3) * 9
         for res in results:
             assert torch.equal(res.cpu(), expected)
+
+
+class _BroadcastFailureGroup:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def broadcast(self, tensors: list[torch.Tensor], options: object) -> None:
+        del tensors, options
+        raise self._error
+
+    def __repr__(self) -> str:
+        return "_BroadcastFailureGroup()"
+
+
+class _WaitFailureWork:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def wait(self) -> None:
+        raise self._error
+
+
+class _WaitFailureGroup:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def broadcast(
+        self, tensors: list[torch.Tensor], options: object
+    ) -> _WaitFailureWork:
+        del tensors, options
+        return _WaitFailureWork(self._error)
+
+    def __repr__(self) -> str:
+        return "_WaitFailureGroup()"
+
+
+@pytest.fixture
+def multi_channel_group(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> MultiChannelProcessGroup:
+    monkeypatch.setattr(distributed_c10d, "BroadcastOptions", SimpleNamespace)
+    monkeypatch.setattr(
+        distributed_c10d, "_check_single_tensor", lambda tensor, name: None
+    )
+    monkeypatch.setattr(distributed_c10d, "_rank_not_in_group", lambda group: False)
+    monkeypatch.setattr(distributed_c10d, "get_group_rank", lambda group, rank: rank)
+    monkeypatch.setattr(dist, "_get_process_group_name", lambda group: "test-group")
+
+    logger = logging.getLogger(__name__)
+    caplog.set_level(logging.ERROR, logger=logger.name)
+    process_group = object.__new__(MultiChannelProcessGroup)
+    process_group._cur_rank = 1
+    process_group._peer_rank = 0
+    process_group._num_channels = 1
+    process_group._is_initialized = True
+    process_group._no_accel_ccl = False
+    process_group._logger = logger
+    return process_group
+
+
+class TestMultiChannelProcessGroupFailures:
+    """Tests that broadcast failures propagate out of the receive path."""
+
+    @staticmethod
+    def _assert_failure_log(
+        caplog: pytest.LogCaptureFixture, expected_error: str
+    ) -> None:
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "ProcessGroup test-group rank 1" in message
+        assert expected_error in message
+
+    def test_recv_propagates_process_group_failure(
+        self,
+        multi_channel_group: MultiChannelProcessGroup,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        error = RuntimeError("connection closed by peer")
+        multi_channel_group._recv_gloo_process_groups = [_BroadcastFailureGroup(error)]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            multi_channel_group.recv(
+                torch.empty(1),
+                device=CollectiveGroup.CPU,
+                channel_id=0,
+            )
+
+        assert exc_info.value is error
+        self._assert_failure_log(caplog, str(error))
+
+    def test_recv_propagates_synchronous_wait_failure(
+        self,
+        multi_channel_group: MultiChannelProcessGroup,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        error = RuntimeError("timed out waiting for recv")
+        multi_channel_group._recv_gloo_process_groups = [_WaitFailureGroup(error)]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            multi_channel_group.recv(
+                torch.empty(1),
+                device=CollectiveGroup.CPU,
+                channel_id=0,
+            )
+
+        assert exc_info.value is error
+        self._assert_failure_log(caplog, str(error))
 
 
 if __name__ == "__main__":

@@ -13,13 +13,10 @@
 # limitations under the License.
 
 import asyncio
-from collections import defaultdict
 
-import torch
 from omegaconf.omegaconf import DictConfig
 
-from rlinf.data.embodied_io_struct import EnvOutput
-from rlinf.scheduler import Channel
+from rlinf.scheduler import Channel, Worker
 from rlinf.workers.env.env_worker import EnvWorker
 
 
@@ -27,19 +24,30 @@ class AsyncEnvWorker(EnvWorker):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
         self._interact_task: asyncio.Task = None
-        assert not self.enable_offload, "Offload not supported in AsyncEnvWorker"
+        assert not (self.train_enable_offload or self.eval_enable_offload), (
+            "Offload not supported in AsyncEnvWorker"
+        )
 
+    @Worker.timer("interact")
     async def interact(
         self,
         input_channel: Channel,
-        output_channel: Channel,
+        rollout_channel: Channel,
+        reward_channel: Channel | None,
+        actor_channel: Channel | None,
         metric_channel: Channel,
     ):
         assert self._interact_task is None or self._interact_task.done(), (
             "Previous interact task is still running while a new interact call is made."
         )
         self._interact_task = asyncio.create_task(
-            self._interact(input_channel, output_channel, metric_channel)
+            self._interact(
+                input_channel,
+                rollout_channel,
+                reward_channel,
+                actor_channel,
+                metric_channel,
+            )
         )
         try:
             await self._interact_task
@@ -49,29 +57,19 @@ class AsyncEnvWorker(EnvWorker):
     async def _interact(
         self,
         input_channel: Channel,
-        output_channel: Channel,
+        rollout_channel: Channel,
+        reward_channel: Channel | None,
+        actor_channel: Channel | None,
         metric_channel: Channel,
     ):
         while True:
-            env_metrics = defaultdict(list)
-            env_output_list = self.bootstrap_step()
-            for stage_id in range(self.stage_num):
-                env_output: EnvOutput = env_output_list[stage_id]
-                self.send_env_batch(output_channel, env_output.to_dict())
-
-            for _ in range(self.n_train_chunk_steps):
-                for stage_id in range(self.stage_num):
-                    await asyncio.sleep(0)
-                    raw_chunk_actions = self.recv_chunk_actions(input_channel)
-                    env_output, env_info = self.env_interact_step(
-                        raw_chunk_actions, stage_id
-                    )
-                    self.send_env_batch(output_channel, env_output.to_dict())
-                    env_output_list[stage_id] = env_output
-                    self.record_env_metrics(env_metrics, env_info, 0)
-
-            for key, value in env_metrics.items():
-                env_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
+            env_metrics = await self._run_interact_once(
+                input_channel,
+                rollout_channel,
+                reward_channel,
+                actor_channel,
+                cooperative_yield=True,
+            )
 
             env_metrics = {f"env/{k}": v for k, v in env_metrics.items()}
             env_interact_time_metrics = self.pop_execution_times()
@@ -79,13 +77,11 @@ class AsyncEnvWorker(EnvWorker):
                 f"time/env/{k}": v for k, v in env_interact_time_metrics.items()
             }
             metrics = {
+                "rank": self._rank,
                 "env": env_metrics,
                 "time": env_interact_time_metrics,
             }
             metric_channel.put(metrics, async_op=True)
-
-            self.store_last_obs_and_intervened_info(env_output_list)
-            self.finish_rollout()
 
     async def stop(self):
         if self._interact_task is not None and not self._interact_task.done():

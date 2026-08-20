@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import os
+import time
 
 import hydra
 import numpy as np
 import torch
 from tqdm import tqdm
 
-from rlinf.data.embodied_io_struct import (
+from rlinf.data.schema.embodied_trajectory_builder import EmbodiedTrajectoryBuilder
+from rlinf.data.schema.embodied_types import (
     ChunkStepResult,
-    EmbodiedRolloutResult,
 )
-from rlinf.data.replay_buffer import TrajectoryReplayBuffer
+from rlinf.data.storage.replay import TrajectoryReplayBuffer
 from rlinf.envs.realworld.realworld_env import RealWorldEnv
 from rlinf.scheduler import Cluster, ComponentPlacement, Worker
 
@@ -36,6 +36,10 @@ class DataCollector(Worker):
         self.cfg = cfg
         self.num_data_episodes = cfg.runner.num_data_episodes
         self.total_cnt = 0
+        override_cfg = cfg.env.eval.get("override_cfg", {})
+        self.manual_episode_control_only = bool(
+            override_cfg.get("manual_episode_control_only", False)
+        )
         self.env = RealWorldEnv(
             cfg.env.eval,
             num_envs=1,
@@ -44,8 +48,34 @@ class DataCollector(Worker):
             worker_info=self.worker_info,
         )
 
-        # Initialize TrajectoryReplayBuffer
-        # Change directory name to 'demos' as requested
+        dc_cfg = cfg.env.eval.get("data_collection")
+        if dc_cfg and getattr(dc_cfg, "enabled", False):
+            from rlinf.envs.wrappers import CollectEpisode
+
+            self.env = CollectEpisode(
+                self.env,
+                save_dir=dc_cfg.save_dir,
+                export_format=dc_cfg.get("export_format", "pickle"),
+                robot_type=dc_cfg.get("robot_type", "panda"),
+                fps=dc_cfg.get("fps", 10),
+                only_success=dc_cfg.get("only_success", False),
+                finalize_interval=dc_cfg.get("finalize_interval", 100),
+                resume=bool(dc_cfg.get("resume", False)),
+            )
+            self._preexisting_success = int(
+                getattr(self.env, "preexisting_episode_count", 0)
+            )
+            if self._preexisting_success:
+                self.log_info(
+                    f"[resume] {self._preexisting_success} pre-existing episodes; "
+                    f"continuing toward {self.num_data_episodes}"
+                )
+        else:
+            self._preexisting_success = 0
+
+        # Read from the wrapped action space so GripperCloseEnv / dual-arm all just work.
+        self.action_dim = int(self.env.action_space.shape[-1])
+
         buffer_path = os.path.join(self.cfg.runner.logger.log_path, "demos")
         self.log_info(f"Initializing ReplayBuffer at: {buffer_path}")
 
@@ -57,10 +87,12 @@ class DataCollector(Worker):
             trajectory_format="pt",
         )
 
+        # Outer rate limiter for envs that don't self-pace (e.g. direct-stream).
+        fps = dc_cfg.get("fps") if dc_cfg else None
+        self._target_step_period = 1.0 / float(fps) if fps else None
+
     def _process_obs(self, obs):
-        """
-        Process observations to match the format expected by EmbodiedRolloutResult.
-        """
+        """Reshape env obs into the dict EmbodiedTrajectoryBuilder expects."""
         if not self.cfg.runner.record_task_description:
             obs.pop("task_descriptions", None)
 
@@ -68,78 +100,77 @@ class DataCollector(Worker):
         for key, val in obs.items():
             if isinstance(val, np.ndarray):
                 val = torch.from_numpy(val)
-
             val = val.cpu()
-
-            # Map keys: 'images' -> 'main_images', others remain
-            if "images" == key:
-                ret_obs["main_images"] = val.clone()  # Keep uint8
+            if key == "images":
+                ret_obs["main_images"] = val.clone()
             else:
                 ret_obs[key] = val.clone()
-
         return ret_obs
 
     def run(self):
         obs, _ = self.env.reset()
-        success_cnt = 0
+        # Seed from preexisting episodes so resume bar + stop target line up.
+        success_cnt = self._preexisting_success
+        if success_cnt >= self.num_data_episodes:
+            self.log_info(f"[resume] target {self.num_data_episodes} already met.")
+            self.env.close()
+            return
         progress_bar = tqdm(
-            range(self.num_data_episodes), desc="Collecting Data Episodes:"
+            total=self.num_data_episodes,
+            initial=success_cnt,
+            desc="Collecting Data Episodes:",
         )
 
-        current_rollout = EmbodiedRolloutResult(
+        current_rollout = EmbodiedTrajectoryBuilder(
             max_episode_length=self.cfg.env.eval.max_episode_steps,
-            model_weights_id="demo_expert",
         )
 
         current_obs_processed = self._process_obs(obs)
 
         while success_cnt < self.num_data_episodes:
-            action = np.zeros((1, 6))
-            next_obs, reward, done, _, info = self.env.step(action)
+            iter_start = time.perf_counter()
+            # Teleop wrapper overrides this via info["intervene_action"].
+            action = np.zeros((1, self.action_dim))
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+
+            # ``kb_phase is None`` ⇒ no keyboard wrapper attached → upstream "record every step".
+            kb_event = info["keyboard_event"][0] if "keyboard_event" in info else None
+            kb_phase = info["keyboard_phase"][0] if "keyboard_phase" in info else None
+            if kb_event:
+                self.log_info(f"[keyboard] {kb_event}")
 
             if "intervene_action" in info:
                 action = info["intervene_action"]
 
             next_obs_processed = self._process_obs(next_obs)
 
-            # --- Construct ChunkStepResult ---
-            # Prepare action tensor [1, 6]
-            if isinstance(action, torch.Tensor):
-                action_tensor = action.float().cpu()
-            else:
-                action_tensor = torch.from_numpy(action).float()
+            terminated_tensor = terminated.unsqueeze(1)
+            truncated_tensor = truncated.unsqueeze(1)
+            done_tensor = terminated_tensor | truncated_tensor
+            done = bool(done_tensor.any().item())
 
-            if action_tensor.ndim == 1:
-                action_tensor = action_tensor.unsqueeze(0)
-
-            # Reward and Done [1, 1]
-            if isinstance(reward, torch.Tensor):
-                reward_tensor = reward.float().cpu()
-            else:
-                reward_tensor = torch.tensor(reward).float()
-            if reward_tensor.ndim == 1:
-                reward_tensor = reward_tensor.unsqueeze(1)
-
-            if isinstance(done, torch.Tensor):
-                done_tensor = done.bool().cpu()
-            else:
-                done_tensor = torch.tensor(done).bool()
-            if done_tensor.ndim == 1:
-                done_tensor = done_tensor.unsqueeze(1)
+            action_tensor = torch.as_tensor(action, dtype=torch.float32)
+            reward_tensor = reward.float().unsqueeze(1)
 
             step_result = ChunkStepResult(
                 actions=action_tensor,
                 rewards=reward_tensor,
                 dones=done_tensor,
-                terminations=done_tensor,
-                truncations=torch.zeros_like(done_tensor),
+                terminations=terminated_tensor,
+                truncations=truncated_tensor,
                 forward_inputs={"action": action_tensor},
             )
 
-            current_rollout.append_step_result(step_result)
-            current_rollout.append_transitions(
-                curr_obs=current_obs_processed, next_obs=next_obs_processed
-            )
+            # Rebuild rollout on rec-start or abort; ``restart`` kept for older wrappers.
+            if kb_event in ("start", "restart", "abort"):
+                current_rollout = EmbodiedTrajectoryBuilder(
+                    max_episode_length=self.cfg.env.eval.max_episode_steps,
+                )
+            if kb_phase in (None, "rec"):
+                current_rollout.append_step_result(step_result)
+                current_rollout.append_transitions(
+                    curr_obs=current_obs_processed, next_obs=next_obs_processed
+                )
 
             obs = next_obs
             current_obs_processed = next_obs_processed
@@ -153,25 +184,56 @@ class DataCollector(Worker):
                 if isinstance(r_val, torch.Tensor):
                     r_val = r_val.item()
 
-                success_cnt += int(r_val)
+                manual_done = False
+                if "manual_done" in info:
+                    md = info["manual_done"]
+                    if hasattr(md, "__getitem__") and len(md) > 0:
+                        manual_done = bool(md[0])
+                    else:
+                        manual_done = bool(md)
+
                 self.total_cnt += 1
-                self.log_info(
-                    f"Success: {r_val}. Total: {success_cnt}/{self.num_data_episodes}"
-                )
+                if self.manual_episode_control_only:
+                    save_episode = bool(manual_done)
+                else:
+                    save_episode = bool(r_val >= 0.5 or manual_done)
 
-                # Save Trajectory to the 'demos' directory
-                trajectory = current_rollout.to_trajectory()
-                trajectory.intervene_flags = torch.ones_like(trajectory.intervene_flags)
-                self.buffer.add_trajectories([trajectory])
+                if save_episode:
+                    success_cnt += 1
 
-                # Reset for next episode
-                obs, _ = self.env.reset()
+                    self.log_info(
+                        f"Success (reward={r_val}, manual_done={manual_done}). "
+                        f"Total: {success_cnt}/{self.num_data_episodes}"
+                    )
+
+                    trajectory = current_rollout.to_trajectory()
+                    trajectory.intervene_flags = torch.ones_like(
+                        trajectory.intervene_flags
+                    )
+                    self.buffer.add_trajectories([trajectory])
+
+                    progress_bar.update(1)
+                else:
+                    self.log_info(
+                        f"Episode ended (reward={r_val:.2f}). "
+                        f"Discarded. Total success: {success_cnt}/{self.num_data_episodes}"
+                    )
+
+                reset_options = None
+                if success_cnt >= self.num_data_episodes:
+                    reset_options = {"skip_wait_for_start": True}
+                obs, _ = self.env.reset(options=reset_options)
                 current_obs_processed = self._process_obs(obs)
-                current_rollout = EmbodiedRolloutResult(
+                current_rollout = EmbodiedTrajectoryBuilder(
                     max_episode_length=self.cfg.env.eval.max_episode_steps,
-                    model_weights_id="demo_expert",
                 )
-                progress_bar.update(1)
+
+            # Pin loop period; on ``done`` env.reset usually exceeds it → sleep_for≤0 no-ops.
+            if self._target_step_period is not None:
+                elapsed = time.perf_counter() - iter_start
+                sleep_for = self._target_step_period - elapsed
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
 
         self.buffer.close()
         self.log_info(

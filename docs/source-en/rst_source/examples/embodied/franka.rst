@@ -1,82 +1,87 @@
-Real-World RL with Franka
-============================
+Real-World RL
+=============
 
 .. |huggingface| image:: /_static/svg/hf-logo.svg
    :width: 16px
    :height: 16px
    :class: inline-icon
 
-This document provides a comprehensive guide to launching and managing the 
-a CNN policy training task within the RLinf framework, 
-focusing on training a ResNet-based CNN policy from scratch for robotic manipulation in the real world setup. 
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/franka_arm_small.jpg
+   :align: center
+   :width: 80%
 
-The primary objective is to develop a model capable of performing robotic manipulation by:
+   Franka Emika Panda arm used for the base RLinf real-world RL workflow.
 
-1. **Visual Understanding**: Processing RGB images from the robot's camera.
-2. **Action Generation**: Producing precise robotic actions (position, rotation), possibly with gripper control.
-3. **Reinforcement Learning**: Optimizing the policy via the SAC with environment feedback.
+Use RLinf to train and evaluate real-world policies on a Franka Emika Panda arm. You'll set up the controller and training nodes, collect demonstrations, run SAC/RLPD or PPO-style training, and monitor safe online updates on physical hardware.
 
-Environment
------------
+Overview
+--------
 
-**Real World Environment**
+Train a real-world manipulation policy from camera observations and robot feedback.
 
-- **Environment**: Real world setup.
+.. grid:: 2 4 4 4
+   :gutter: 2
 
-  - Franka Emika Panda robotic arm
-  - Realsense cameras
-  - Possibly use spacemouse for teleoperation data collection or human intervention.
+   .. grid-item-card:: Models
+      :text-align: center
 
-- **Task**: Currently we support the peg-insertion task and the charger task. 
-- **Observation**:
+      CNN policy · OpenPI π₀.₅
 
-  - RGB images (128x128) from a wrist camera or a third-person camera.
+   .. grid-item-card:: Algorithms
+      :text-align: center
 
-- **Action Space**: 6 or 7-dimensional continuous actions, depending on whether gripper control is included:
+      SAC · Cross-Q · RLPD · PPO
 
-  - 3D position control (x, y, z)
-  - 3D rotation control (roll, pitch, yaw)
-  - Gripper control (open/close)
+   .. grid-item-card:: Tasks
+      :text-align: center
 
-**Data Structure**
+      Peg insertion · charger · PnP
 
-- **Images**: RGB tensors ``[batch_size, 128, 128, 3]``
-- **Actions**: Normalized continuous values ``[-1, 1]`` for each action dimension
-- **Rewards**: Step-level rewards based on task completion
+   .. grid-item-card:: Hardware
+      :text-align: center
 
+      Franka · RealSense/ZED · gripper
 
-Algorithm
------------------------------------------
+| **You'll do:** install controller deps → collect demos → start Ray → launch real-world training → watch ``env/reward`` and videos.
+| **Prerequisites:** :doc:`Installation </rst_source/start/installation>` · Franka firmware/libfranka match · local network · safety operator.
 
-**Core Algorithm Components**
+Tasks
+~~~~~
 
-1. **SAC (Soft Actor-Critic)**
+.. list-table::
+   :header-rows: 1
+   :widths: 24 24 24
 
-   - Learning Q-values by Bellman backups and entropy regularization.
+   * - Task
+     - Config / entry point
+     - Description
+   * - Peg insertion
+     - ``realworld_peginsertion_rlpd_cnn_async``
+     - Insert a peg at a target end-effector pose.
+   * - Charger
+     - ``realworld_charger_sac_cnn_async``
+     - Align and insert a charger using real-world reward feedback.
+   * - PnP / eval
+     - ``realworld_pnp_*``
+     - Collect or deploy pick-and-place style policies.
 
-   - Learning policy to maximize entropy-regularized Q.
+Observation and Action
+~~~~~~~~~~~~~~~~~~~~~~
 
-   - Learning temperature parameter for exploration-exploitation trade-off.
+.. list-table::
+   :header-rows: 1
+   :widths: 24 24
 
-2. **Cross-Q**
-
-   - A variant of SAC that removes the target Q network.
-
-   - Concating curr-obs and next-obs in one batch, incorporating BatchNorm for stable training for Q.
-
-3. **RLPD (Reinforcement Learning with Prior Data)**
-
-   - A variant of SAC that incorporates prior data for improved learning efficiency.
-
-   - High update-to-data ratio to leverage collected data effectively.
-
-4. **CNN Policy Network**
-
-   - ResNet-based architecture for processing visual inputs.
-
-   - MLP layers for fusing images and states to output actions.
-
-   - Q heads for critic functions.
+   * - Field
+     - Description
+   * - Observation
+     - RGB camera frames plus optional robot state.
+   * - Action
+     - 6D/7D continuous Cartesian delta action, optionally with gripper control.
+   * - Reward
+     - Task success, keyboard labels, or dense task-specific feedback.
+   * - Prompt
+     - Real-world task text in the env config when a VLA policy is used.
 
 Hardware Setup
 ----------------
@@ -84,18 +89,30 @@ Hardware Setup
 The real-world setup requires the following hardware components:
 
 - **Robotic Arm**: Franka Emika Panda
-- **Cameras**: Intel RealSense cameras for capturing RGB images
+- **Cameras**: Intel RealSense cameras (default) or Stereolabs ZED cameras
+- **Gripper**: Franka hand (default) or Robotiq 2F-85/2F-140
 - **Computing Unit**: A computer with GPU support for training the CNN policy
 - **Robot Controller**: A small computer (does not require GPU) connected with the robotic arm in the same local network
 - **Space Mouse (Optional)**: For teleoperation data collection or human intervention during training.
+- **GELLO (Optional)**: A joint-level teleoperation device as an alternative to SpaceMouse, providing more intuitive control with native gripper support.
+- **VR / PICO (Optional)**: A headset-and-controller teleoperation device for 6D end-effector control, usable as an alternative to SpaceMouse for data collection.
 
 .. warning::
 
   Ensure all computers are networked in the same local network.
   The robot arm is only required to be in the same local network as the robot controller.
 
-Dependency Installation
--------------------------
+.. note::
+
+   **Using ZED cameras or Robotiq grippers?**  See the dedicated guide
+   :doc:`franka_zed_robotiq` for SDK installation, serial-device setup,
+   YAML configuration fields, and data collection.
+
+   **Using VR / PICO teleoperation?** See :doc:`franka_vr` for
+   XRoboToolkit, ZeroMQ, PICO wrapper configuration, and operation steps.
+
+Installation
+------------
 
 The controller node and the training/rollout node(s) should be set up with different software dependencies.
 
@@ -111,9 +128,8 @@ Please take a note of the firmware version for later use.
 .. raw:: html
 
   <div style="flex: 1; text-align: center;">
-      <img src="https://github.com/RLinf/misc/blob/main/pic/franka_firmware.png?raw=true" style="width: 60%;"/>
+      <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/franka_firmware.png" style="width: 60%;"/>
   </div>
-
 .. warning::
 
   Make sure that the Franka firmware version is ``<5.9.0`` for compatibility with the serl_franka_controllers.
@@ -124,7 +140,7 @@ Please take a note of the firmware version for later use.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The Franka controller is recommended to run on a real-time kernel for better performance.
-Follow the instructions in `Franka documentation <https://frankarobotics.github.io/docs/libfranka/docs/real_time_kernel.html>`_ to install the real-time kernel.
+Follow the instructions in `Franka documentation <https://frankarobotics.github.io/docs/doc/libfranka/docs/real_time_kernel.html>`_ to install the real-time kernel.
 
 3. Installation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -135,7 +151,7 @@ __________________________
 .. code:: bash
 
    # For mainland China users, you can use the following for better download speed:
-   # git clone https://ghfast.top/github.com/RLinf/RLinf.git
+   # git clone https://gh-proxy.com/github.com/RLinf/RLinf.git
    git clone https://github.com/RLinf/RLinf.git
    cd RLinf
 
@@ -155,9 +171,9 @@ To access the robot, camera, and space mouse devices from within the docker cont
       --network host \
       --name rlinf \
       -v .:/workspace/RLinf \
-      rlinf/rlinf:agentic-rlinf0.1-franka
+      rlinf/rlinf:agentic-rlinf0.4-franka
       # For mainland China users, you can use the following for better download speed:
-      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.1-franka
+      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.4-franka
 
 Currently, the docker image contains libfranka version ``0.10.0``, ``0.13.3``, ``0.14.1``, ``0.15.0``, and ``0.18.0`` with franka_ros version ``0.10.0``.
 
@@ -201,7 +217,7 @@ Our installation script consists of the installation of two parts:
 .. note::
 
   If the script does not work for you, please refer to the official `ROS Noectic <https://wiki.ros.org/noetic/Installation/Ubuntu>`_ for ROS Noetic installation, `Franka <https://frankarobotics.github.io/docs/libfranka/docs/installation.html>`_ for libfranka and franka_ros installation, and `serl_franka_controllers <https://github.com/rail-berkeley/serl_franka_controllers>`_ for serl_franka_controllers installation.
-  
+
 Execute the following command to install the dependencies:
 
 .. code:: bash
@@ -211,21 +227,21 @@ Execute the following command to install the dependencies:
    bash requirements/install.sh embodied --env franka
    source .venv/bin/activate
 
-Training/Rollout Nodes
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Training / Rollout Nodes
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-a. Clone RLinf Repository
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A. Clone RLinf Repository
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code:: bash
 
    # For mainland China users, you can use the following for better download speed:
-   # git clone https://ghfast.top/github.com/RLinf/RLinf.git
+   # git clone https://gh-proxy.com/github.com/RLinf/RLinf.git
    git clone https://github.com/RLinf/RLinf.git
    cd RLinf
 
-b. Install Dependencies
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+B. Install Dependencies
+^^^^^^^^^^^^^^^^^^^^^^^
 
 **Option 1: Docker Image**
 
@@ -238,9 +254,9 @@ Use Docker image for the experiment.
       --network host \
       --name rlinf \
       -v .:/workspace/RLinf \
-      rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+      rlinf/rlinf:agentic-rlinf0.4-maniskill_libero
       # For mainland China users, you can use the following for better download speed:
-      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.1-maniskill_libero
+      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.4-maniskill_libero
 
 **Option 2: Custom Environment**
 
@@ -252,9 +268,9 @@ Install dependencies directly in your environment by running the following comma
 
    bash requirements/install.sh embodied --model openvla --env maniskill_libero
    source .venv/bin/activate
-   
-Model Download
----------------
+
+Download the Model
+------------------
 
 Before starting training, you need to download the corresponding pretrained model:
 
@@ -275,15 +291,15 @@ Before starting training, you need to download the corresponding pretrained mode
 
 After downloading, make sure to correctly specify the model path in the configuration yaml file.
 
-Running the Experiment
------------------------
+Run It
+------
 
 Prerequisites
 ~~~~~~~~~~~~~~~
 
 **Get the Target Pose for the Task**
 
-To acquire the target pose for the peg-insertion task, you can use the `toolkits.realworld_check.test_controller` script.
+To acquire the target pose for the peg-insertion task, you can use the `toolkits.realworld_check.test_franka_controller` script.
 
 First, you need to activate your Franka robot's programming mode, and manually move the robot to the desired target pose.
 
@@ -297,7 +313,7 @@ Next, run the script:
 
 .. code-block:: bash
 
-   python -m toolkits.realworld_check.test_controller
+   python -m toolkits.realworld_check.test_franka_controller
 
 The script will prompt you to input command, you can enter `getpos_euler` to get the current end-effector pose in Euler angles.
 
@@ -354,6 +370,51 @@ The script will terminate after 20 episodes of data collection (can be configure
 
 5. After data collection, you can upload the collected data to the training/rollout nodes.
 
+.. note::
+
+   **Using ZED cameras and Robotiq grippers?**  A dedicated data collection
+   script and config are available.  See the
+   :ref:`Data Collection <franka-zed-robotiq-data-collection>` section in
+   :doc:`franka_zed_robotiq`.
+
+Data Collection with GELLO
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to SpaceMouse, RLinf also supports using `GELLO <https://github.com/wuphilipp/gello_software>`_ for teleoperation data collection.
+GELLO is a joint-level teleoperation device that mirrors the kinematic structure of the Franka arm, providing more intuitive and precise control with full gripper support.
+
+**Prerequisites**
+
+- Install the ``gello`` and ``gello-teleop`` packages. See :doc:`franka_gello` for detailed installation instructions.
+- A GELLO device connected to the control node via USB serial.
+- Identify your GELLO serial port (e.g. ``/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA0OUKN-if00-port0``).
+  You can list available serial ports with:
+
+  .. code-block:: bash
+
+     ls /dev/serial/by-id/
+
+**Configuration**
+
+Use the config file ``examples/embodiment/config/realworld_collect_data_gello.yaml``.
+The key differences from the SpaceMouse config are:
+
+.. code-block:: yaml
+
+   env:
+     eval:
+       use_spacemouse: False
+       use_gello: True
+       gello_port: "/dev/serial/by-id/usb-FTDI_..."  # Replace with your GELLO serial port
+
+**Running**
+
+.. code-block:: bash
+
+   bash examples/embodiment/collect_data.sh realworld_collect_data_gello
+
+The workflow is the same as SpaceMouse collection: use the GELLO device to demonstrate the task, and the script will automatically save successful episodes.
+
 Cluster Setup
 ~~~~~~~~~~~~~~~~~
 
@@ -370,11 +431,11 @@ You can modify the script accordingly and source it before starting ray on each 
 Specifically, the script sets up the following important aspects:
 
 1. Source the correct virtual python environment. See the section on Dependency Installation for details.
-   
+
 2. Source the franka_ros and serl_franka_controllers packages setup scripts (if on the controller node), usually at ``<your_catkin_ws>/devel/setup.bash``. **If you are using the docker image or the installation script, this is already done when you source the virtual python environment.**
 
 3. Setup RLinf environment variables on all nodes:
-   
+
 .. code-block:: bash
 
    export PYTHONPATH=<path_to_your_RLinf_repo>:$PYTHONPATH
@@ -383,7 +444,7 @@ Specifically, the script sets up the following important aspects:
 
 The ``RLINF_NODE_RANK`` is set to ``0 ~ N-1`` for each of the ``N`` nodes in the cluster, and is used by the configuration file to identify the node.
 
-The ``RLINF_COMM_NET_DEVICES`` is optional and only needed if you have multiple network devices on your machine, e.g., ``eth0``, ``enp3s0``, which must be the network card providing the IP that can be accessed by other nodes in the cluster. 
+The ``RLINF_COMM_NET_DEVICES`` is optional and only needed if you have multiple network devices on your machine, e.g., ``eth0``, ``enp3s0``, which must be the network card providing the IP that can be accessed by other nodes in the cluster.
 This can be checked by running ``ifconfig`` or ``ip addr`` on your machine.
 
 After sourcing the script, you can start ray on each node as follows:
@@ -400,8 +461,8 @@ Here `<head_node_ip_address>` is the IP address of the head node that can be acc
 
 You can run `ray status` to check if the cluster is set up correctly.
 
-Configuration file
-~~~~~~~~~~~~~~~~~~~~~~
+Configuration File
+~~~~~~~~~~~~~~~~~~
 
 Before starting the experiment, you need to modify the configuration file, ``examples/embodiment/config/realworld_peginsertion_rlpd_cnn_async.yaml`` according to your setup.
 
@@ -409,6 +470,48 @@ Similarly, you first need to fill your robot's IP address to the field ``robot_i
 
 Then, change the ``model_path`` field in both ``rollout`` and ``actor`` sections to the path where you have downloaded the pretrained model.
 Change the ``data.path`` field to the path where you have uploaded the collected demo data.
+
+Headless Keyboard Reward Wrapper (Optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you want to label rewards from a physical keyboard by human, enable the keyboard wrapper in the real-world env config.
+
+For example, in ``examples/embodiment/config/realworld_peginsertion_rlpd_cnn_async.yaml``:
+
+.. code-block:: yaml
+
+   env:
+     train:
+       keyboard_reward_wrapper: single_stage  # or multi_stage
+
+The available modes are:
+
+- ``single_stage``: press ``a`` for failure reward, ``b`` for neutral reward, and ``c`` for success reward.
+- ``multi_stage``: press ``a`` / ``b`` / ``c`` to switch among reward stages, and press ``q`` to emit a negative reward.
+
+The keyboard listener reads Linux input devices directly, so you should export ``RLINF_KEYBOARD_DEVICE`` before starting ray on the controller node.
+
+First, list the available keyboard devices:
+
+.. code-block:: bash
+
+   ls -l /dev/input/by-id/*-event-kbd
+
+This command shows the stable keyboard name and the corresponding ``eventX`` device. For example, ``usb-Logitech_USB_Keyboard-event-kbd -> ../event20`` means the keyboard device is ``/dev/input/event20``.
+
+Before starting training, grant access to that event device:
+
+.. code-block:: bash
+
+   chmod 666 /dev/input/event20
+
+Then export the event device in your setup script or shell before ``ray start``:
+
+.. code-block:: bash
+
+   export RLINF_KEYBOARD_DEVICE=/dev/input/event20
+
+If you are using ``ray_utils/realworld/setup_before_ray.sh``, add the export there on the controller node so that all ray-launched env processes inherit it.
 
 Testing the Setup (Optional)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -419,11 +522,11 @@ First, test the camera connection by running on the controller node:
 
 .. code-block:: bash
 
-   python -m toolkits.realworld_check.test_camera
+   python -m toolkits.realworld_check.test_franka_camera
 
-Next, test the basic cluster setup by running a dummy setup. Refer to ``examples/embodiment/config/real_world_dummy_sac_cnn.yaml`` and add `env.eval.override_cfg`.
+Next, test the basic cluster setup by running a dummy setup. Refer to ``examples/embodiment/config/realworld_dummy_franka_sac_cnn.yaml`` and add `env.eval.override_cfg`.
 You can set the `is_dummy` field to `True` in both `env.train.override_cfg` and `env.eval.override_cfg` sections in the configuration file to enable the dummy setup.
-And fill the camera serial numbers obtained from ``running toolkits.realworld_check.test_camera.py`` into the field `camera_serials` under both `env.train.override_cfg` and `env.eval.override_cfg`.
+And fill the camera serial numbers obtained from ``running toolkits.realworld_check.test_franka_camera.py`` into the field `camera_serials` under both `env.train.override_cfg` and `env.eval.override_cfg`.
 
 Then, run the test script on the head node:
 
@@ -431,8 +534,8 @@ Then, run the test script on the head node:
 
    bash examples/embodiment/run_realworld_async.sh realworld_peginsertion_rlpd_cnn_async
 
-Running the Experiment
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Run It
+~~~~~~
 
 After verifying the setup, you can start the real-world training experiment by running the following command on the head node:
 
@@ -453,7 +556,7 @@ An example configuration for two Franka robots is shown in ``examples/embodiment
   cluster:
   num_nodes: 3 # One training/rollout node + two robot controller nodes
   component_placement:
-    actor: 
+    actor:
       node_group: "4090"
       placement: 0 # Run on the first GPU of the training/rollout node
     env:
@@ -476,7 +579,10 @@ An example configuration for two Franka robots is shown in ``examples/embodiment
             node_rank: 2 # The node rank of the second robot controller node
 
 Naturally, the settings can be extended to more robots by following the same pattern.
-For more details regarding the configuration syntax of this kind of heterogeneous hardware setup, please refer to :doc:`../../tutorials/advance/hetero`.
+For more details regarding the configuration syntax of this kind of heterogeneous hardware setup, please refer to :doc:`../../guides/hetero`.
+
+To hide policy inference latency on the real robot by overlapping it with action-chunk
+execution, see :doc:`RTC <../../guides/rtc>`.
 
 Visualization and Results
 -------------------------
@@ -496,7 +602,7 @@ At the ray head node, run:
 
   - ``env/episode_len``: Number of environment steps elapsed in the episode (unit: step).
   - ``env/return``: Episode return.
-  - ``env/reward``: Step-level reward.  
+  - ``env/reward``: Step-level reward.
   - ``env/success_once``: Recommended metric to monitor training performance. It directly reflects the unnormalized episodic success rate.
 
 - **Training Metrics**:
@@ -526,7 +632,7 @@ Here we provide demo videos and training curves for the task peg-insertion and c
 .. raw:: html
 
   <div style="flex: 0.8; text-align: center;">
-      <img src="https://github.com/RLinf/misc/raw/main/pic/realworld-curve.png" style="width: 100%;"/>
+      <img src="https://raw.githubusercontent.com/RLinf/misc/main/pic/realworld-curve.png" style="width: 100%;"/>
       <p><em>Training Curve</em></p>
     </div>
 
@@ -534,7 +640,7 @@ Here we provide demo videos and training curves for the task peg-insertion and c
 
   <div style="flex: 1; text-align: center;">
     <video controls autoplay loop muted playsinline preload="metadata" width="720">
-      <source src="https://github.com/RLinf/misc/raw/main/pic/peg-insertion-compressed.mp4" type="video/mp4">
+      <source src="https://raw.githubusercontent.com/RLinf/misc/main/pic/peg-insertion-compressed.mp4" type="video/mp4">
       Your browser does not support the video tag.
     </video>
     <p><em>Peg Insertion</em></p>
@@ -544,7 +650,7 @@ Here we provide demo videos and training curves for the task peg-insertion and c
 
   <div style="flex: 1; text-align: center;">
     <video controls autoplay loop muted playsinline preload="metadata" width="720">
-      <source src="https://github.com/RLinf/misc/raw/main/pic/charger-compressed.mp4" type="video/mp4">
+      <source src="https://raw.githubusercontent.com/RLinf/misc/main/pic/charger-compressed.mp4" type="video/mp4">
       Your browser does not support the video tag.
     </video>
     <p><em>Charger</em></p>

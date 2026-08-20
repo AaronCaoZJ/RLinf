@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numbers
 import os
 import warnings
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -33,11 +34,32 @@ class RecordVideo(gym.Wrapper):
     """
     A general video recording wrapper that owns the recording logic.
 
-    Features:
-    1. Manage render_images and video_cnt
-    2. Append frames after reset/step/chunk_step
-    3. Provide flush_video to save videos
-    4. Support multiple obs image formats and batched/sequence inputs
+    ``RecordVideo`` centralizes frame collection and MP4 writing for both regular
+    stepping and chunked stepping APIs. Frames are buffered in memory and flushed
+    asynchronously to avoid blocking environment interaction.
+
+    The wrapper supports multiple observation image layouts (single frame, batched
+    frames, and temporal batches). For ``chunk_step()``, it correctly handles the
+    terminal-to-reset transition by recording terminal observations (for the last
+    step in the chunk) and then appending the corresponding reset observations.
+
+    When ``video_cfg.info_on_video`` is enabled, per-frame text metadata is drawn
+    through ``put_info_on_image()``. The overlay always includes reward and
+    termination when available, and can include extra fields from environment
+    ``info`` via ``video_cfg.extra_info_on_video``. Nested keys are supported with
+    dot notation, for example
+    ``["env_id", "episode.success_once", "episode.episode_len"]``.
+
+    Args:
+        env: Wrapped environment. It must expose a ``seed`` attribute and may
+            optionally provide ``num_envs`` and metadata for FPS inference.
+        video_cfg: Video configuration object/dict. Common fields:
+            ``video_base_dir`` (output directory root),
+            ``fps`` (optional FPS override),
+            ``info_on_video`` (whether to render overlay text),
+            ``extra_info_on_video`` (list of ``info`` keys to render).
+        fps: Explicit FPS override. If ``None``, FPS is resolved from
+            ``video_cfg.fps``, environment config/metadata, then fallback ``30``.
     """
 
     def __init__(self, env: gym.Env, video_cfg, fps: Optional[int] = None):
@@ -62,6 +84,14 @@ class RecordVideo(gym.Wrapper):
         else:
             self._fps = self._get_fps_from_env(env)
 
+    @property
+    def is_start(self):
+        return getattr(self.env, "is_start")
+
+    @is_start.setter
+    def is_start(self, value):
+        setattr(self.env, "is_start", value)
+
     def _get_fps_from_env(self, env: gym.Env) -> int:
         """Resolve FPS from config/env metadata with fallback."""
         if hasattr(self.video_cfg, "fps") and self.video_cfg.fps is not None:
@@ -85,6 +115,8 @@ class RecordVideo(gym.Wrapper):
 
     def _get_image_from_dict(self, obs: dict) -> Optional[Any]:
         """Pick the best image field from an observation dict."""
+        if hasattr(self.env, "capture_image"):
+            return self.env.capture_image()
         for key in ("main_images", "images", "rgb", "full_image", "main_image"):
             if key in obs and obs[key] is not None:
                 return obs[key]
@@ -168,7 +200,7 @@ class RecordVideo(gym.Wrapper):
 
     def _value_for_env(self, value: Any, env_id: int):
         """Select a scalar/value for a specific env from batched inputs."""
-        if torch is not None and isinstance(value, torch.Tensor):
+        if isinstance(value, torch.Tensor):
             value = value.detach().cpu().numpy()
         if isinstance(value, np.ndarray):
             if value.shape == ():
@@ -199,8 +231,36 @@ class RecordVideo(gym.Wrapper):
             return task_desc[0] if isinstance(task_desc, (list, tuple)) else task_desc
         return None
 
+    def _get_video_info_keys(self) -> list[str]:
+        """Get configured info keys to overlay on video frames."""
+        if hasattr(self.video_cfg, "extra_info_on_video"):
+            keys = getattr(self.video_cfg, "extra_info_on_video")
+        else:
+            keys = None
+
+        if keys:
+            if isinstance(keys, str):
+                return [keys]
+            return list(keys)
+        return []
+
+    def _lookup_info_value(self, info: Any, key: str) -> Any:
+        """Read a key from info, supporting dotted access for nested dicts."""
+        if not isinstance(info, dict):
+            return None
+        if key in info:
+            return info[key]
+
+        value = info
+        for part in key.split("."):
+            if not isinstance(value, dict) or part not in value:
+                return None
+            value = value[part]
+        return value
+
     def _build_info_item(
         self,
+        infos: Optional[Any],
         rewards: Optional[Any],
         terminations: Optional[Any],
         env_id: int,
@@ -223,11 +283,30 @@ class RecordVideo(gym.Wrapper):
                     value = value[time_idx]
             info_item["termination"] = bool(value) if value is not None else value
 
+        if infos is not None:
+            for key in self._get_video_info_keys():
+                value = self._lookup_info_value(infos, key)
+                if value is None:
+                    continue
+                value = self._value_for_env(value, env_id)
+                if isinstance(value, np.ndarray):
+                    if value.shape == ():
+                        value = value.item()
+                    elif value.size == 1:
+                        value = value.reshape(-1)[0].item()
+                elif isinstance(value, numbers.Number):
+                    pass
+                else:
+                    warnings.warn(f"Unsupported value type {type(value)} for key {key}")
+                    continue
+                info_item[key] = value
+
         return info_item
 
     def _append_frame(
         self,
         images: list[np.ndarray],
+        infos: Optional[Any],
         rewards: Optional[Any],
         terminations: Optional[Any],
         time_idx: Optional[int] = None,
@@ -239,7 +318,9 @@ class RecordVideo(gym.Wrapper):
             images = [
                 put_info_on_image(
                     img,
-                    self._build_info_item(rewards, terminations, env_id, time_idx),
+                    self._build_info_item(
+                        infos, rewards, terminations, env_id, time_idx
+                    ),
                 )
                 for env_id, img in enumerate(images)
             ]
@@ -268,11 +349,12 @@ class RecordVideo(gym.Wrapper):
 
         if isinstance(infos, (list, tuple)):
             for time_idx, images in enumerate(frames):
-                self._append_frame(images, rewards, terminations, time_idx)
+                step_info = infos[time_idx] if len(infos) > time_idx else None
+                self._append_frame(images, step_info, rewards, terminations, time_idx)
             return
 
         for time_idx, images in enumerate(frames):
-            self._append_frame(images, rewards, terminations, time_idx)
+            self._append_frame(images, infos, rewards, terminations, time_idx)
 
     def reset(self, *args, **kwargs):
         """Reset env and record the initial frame."""
@@ -291,11 +373,34 @@ class RecordVideo(gym.Wrapper):
         self.add_new_frames(obs, info, reward, terminations)
         return obs, reward, terminated, truncated, info
 
-    def chunk_step(self, *args, **kwargs):
-        """Step a chunk and record all frames from the chunk."""
-        result = self.env.chunk_step(*args, **kwargs)
+    def record_video_in_result(self, result) -> None:
+        """Record video frames from a chunk_step / async_chunk_step result tuple."""
         if isinstance(result, tuple) and len(result) >= 5:
             obs_list, rewards, terminations, _truncations, infos_list = result[:5]
+
+            # Some envs may skip intermediate observations for performance and return
+            # None entries. Filter them out for video collection.
+            if isinstance(obs_list, (list, tuple)):
+                valid_indices = [i for i, obs in enumerate(obs_list) if obs is not None]
+                if len(valid_indices) == 0:
+                    return
+                if len(valid_indices) != len(obs_list):
+                    obs_list = [obs_list[i] for i in valid_indices]
+                    if isinstance(infos_list, (list, tuple)):
+                        infos_list = [infos_list[i] for i in valid_indices]
+                    if (
+                        torch is not None
+                        and isinstance(rewards, torch.Tensor)
+                        and rewards.ndim == 2
+                    ):
+                        rewards = rewards[:, valid_indices]
+                    if (
+                        torch is not None
+                        and isinstance(terminations, torch.Tensor)
+                        and terminations.ndim == 2
+                    ):
+                        terminations = terminations[:, valid_indices]
+
             final_obs = None
             last_info = None
             if isinstance(infos_list, (list, tuple)) and len(infos_list) > 0:
@@ -323,10 +428,24 @@ class RecordVideo(gym.Wrapper):
                 self.add_new_frames(reset_obs, None)
             else:
                 self.add_new_frames(obs_list, infos_list, rewards, terminations)
+
+    def chunk_step(self, *args, **kwargs):
+        """Step a chunk and record all frames from the chunk."""
+        result = self.env.chunk_step(*args, **kwargs)
+        self.record_video_in_result(result)
         return result
 
     def flush_video(self, video_sub_dir: Optional[str] = None):
-        """Write buffered frames to an MP4 file (async)."""
+        """Write buffered frames to an MP4 file.
+
+        The encode happens on the background thread pool, but we wait for the
+        just-submitted write to complete before returning. The wait is required
+        so the MP4 has a finalized ``moov`` atom on disk: ``imageio`` only writes
+        it during ``writer.close()``, and the pool's worker threads are daemon
+        threads that get killed mid-task at interpreter exit (no ``atexit``
+        handler is run under Ray actor shutdown either). Without this wait,
+        eval videos end at ``mdat`` and no player can open them.
+        """
         if not self.render_images:
             return
 
@@ -341,13 +460,17 @@ class RecordVideo(gym.Wrapper):
         frames = list(self.render_images)
         self.render_images = []
         self.video_cnt += 1
-        self._submit_save(frames, mp4_path)
+        future = self._submit_save(frames, mp4_path)
+        # Block until the encode + writer.close() returns so the MP4 is valid
+        # on disk before the rollout loop continues (or the process exits).
+        future.result()
 
-    def _submit_save(self, frames: list[np.ndarray], mp4_path: str) -> None:
-        """Submit a background job to save the video."""
+    def _submit_save(self, frames: list[np.ndarray], mp4_path: str) -> Future:
+        """Submit a background job to save the video, return its Future."""
         self._prune_futures()
         future = self._executor.submit(self._save_video, frames, mp4_path)
         self._save_futures.append(future)
+        return future
 
     def _save_video(self, frames: list[np.ndarray], mp4_path: str) -> None:
         """Save frames to disk (runs in background)."""

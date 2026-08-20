@@ -20,10 +20,16 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
+from torch.utils.data import DataLoader
 
 from rlinf.config import SupportedModel
-from rlinf.data.embodied_io_struct import Trajectory
-from rlinf.data.replay_buffer import TrajectoryReplayBuffer
+from rlinf.data.schema.embodied_types import Trajectory
+from rlinf.data.storage.replay import (
+    PreloadReplayBufferDataset,
+    ReplayBufferDataset,
+    TrajectoryReplayBuffer,
+    replay_buffer_collate_fn,
+)
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.modules.entropy_tunning import EntropyTemperature
 from rlinf.scheduler import Channel, Worker
@@ -34,11 +40,11 @@ from rlinf.utils.metric_utils import (
     compute_split_num,
 )
 from rlinf.utils.nested_dict_process import (
-    concat_batch,
     put_tensor_device,
     split_dict_to_chunk,
 )
-from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
+from rlinf.utils.utils import clear_memory, collect_param_names_need_sync
+from rlinf.workers.actor.embodied_fsdp_actor_worker import EmbodiedFSDPActor
 
 
 class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
@@ -63,7 +69,6 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         if self.cfg.actor.get("enable_offload", False):
             self.offload_param_and_grad()
             self.offload_optimizer()
-        self._setup_rollout_weight_dst_ranks()
         if self.cfg.actor.get("compile_model", False):
             self.model = torch.compile(
                 self.model, mode="default"
@@ -85,6 +90,10 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 target_module.gradient_checkpointing_enable()
         else:
             self.logger.info("[FSDP] Gradient checkpointing is disabled")
+
+        # Record the original trainable parameter names before FSDP wrapping.
+        # Persistent buffer names are also recorded for selective weight syncing.
+        self.param_names_need_sync = collect_param_names_need_sync(module)
 
         # build model, optimizer, lr_scheduler, grad_scaler
         self.model = self._strategy.wrap_model(
@@ -144,7 +153,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         self.build_lr_schedulers()
 
         self.grad_scaler = self.build_grad_scaler(
-            self.cfg.actor.fsdp_config.amp.use_grad_scaler
+            self.cfg.actor.fsdp_config.grad_scaler
         )
 
     def build_lr_schedulers(self):
@@ -182,6 +191,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             ),
         )
 
+        min_demo_buffer_size = 0
         if self.cfg.algorithm.get("demo_buffer", None) is not None:
             auto_save_path = self.cfg.algorithm.demo_buffer.get("auto_save_path", None)
             if auto_save_path is None:
@@ -199,6 +209,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 auto_save_path=auto_save_path,
                 trajectory_format="pt",
             )
+            min_demo_buffer_size = self.cfg.algorithm.demo_buffer.min_buffer_size
             if self.cfg.algorithm.demo_buffer.get("load_path", None) is not None:
                 self.demo_buffer.load_checkpoint(
                     self.cfg.algorithm.demo_buffer.load_path,
@@ -206,6 +217,27 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                     local_rank=self._rank,
                     world_size=self._world_size,
                 )
+
+        if self.cfg.algorithm.replay_buffer.get("enable_preload", False):
+            buffer_dataset_cls = PreloadReplayBufferDataset
+        else:
+            buffer_dataset_cls = ReplayBufferDataset
+        self.buffer_dataset = buffer_dataset_cls(
+            replay_buffer=self.replay_buffer,
+            demo_buffer=self.demo_buffer,
+            batch_size=self.cfg.actor.global_batch_size // self._world_size,
+            min_replay_buffer_size=self.cfg.algorithm.replay_buffer.min_buffer_size,
+            min_demo_buffer_size=min_demo_buffer_size,
+            prefetch_size=self.cfg.algorithm.replay_buffer.get("prefetch_size", 10),
+        )
+        self.buffer_dataloader = DataLoader(
+            self.buffer_dataset,
+            batch_size=1,
+            num_workers=0,
+            drop_last=True,
+            collate_fn=replay_buffer_collate_fn,
+        )
+        self.buffer_dataloader_iter = iter(self.buffer_dataloader)
 
         self.critic_actor_ratio = self.cfg.algorithm.get("critic_actor_ratio", 1)
         self.critic_subsample_size = self.cfg.algorithm.get("critic_subsample_size", -1)
@@ -278,6 +310,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                         )
                         target_param.data.copy_(shadow.to(target_param.data.dtype))
 
+    @Worker.timer("actor/recv_traj")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
         Receive rollout trajectories from rollout workers.
@@ -285,7 +318,9 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         Args:
             input_channel: The input channel to read from.
         """
-        send_num = self._component_placement.get_world_size("rollout") * self.stage_num
+        clear_memory(sync=False)
+
+        send_num = self._component_placement.get_world_size("env") * self.stage_num
         recv_num = self._component_placement.get_world_size("actor")
         split_num = compute_split_num(send_num, recv_num)
 
@@ -301,9 +336,9 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             intervene_traj_list = []
             for traj in recv_list:
                 assert isinstance(traj, Trajectory)
-                intervene_traj = traj.extract_intervene_traj()
-                if intervene_traj is not None:
-                    intervene_traj_list.append(intervene_traj)
+                intervene_trajs = traj.extract_intervene_traj()
+                if intervene_trajs is not None:
+                    intervene_traj_list.extend(intervene_trajs)
 
             if len(intervene_traj_list) > 0:
                 self.demo_buffer.add_trajectories(intervene_traj_list)
@@ -336,7 +371,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 SupportedModel.OPENVLA_OFT,
             ]:
                 kwargs["temperature"] = (
-                    self.cfg.algorithm.sampling_params.temperature_train
+                    self.cfg.rollout.sampling_params.temperature_train
                 )
             if use_dsrl:
                 kwargs["train"] = True
@@ -448,7 +483,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         curr_obs = batch["curr_obs"]
         kwargs = {}
         if self.cfg.actor.model.model_type in ["openvla", "openvla_oft"]:
-            kwargs["temperature"] = self.cfg.algorithm.sampling_params.temperature_train
+            kwargs["temperature"] = self.cfg.rollout.sampling_params.temperature_train
         if self.use_dsrl:
             kwargs["train"] = True
         pi, log_pi, shared_feature = self.model(
@@ -498,7 +533,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             kwargs = {}
             if self.cfg.actor.model.model_type in ["openvla", "openvla_oft"]:
                 kwargs["temperature"] = (
-                    self.cfg.algorithm.sampling_params.temperature_train
+                    self.cfg.rollout.sampling_params.temperature_train
                 )
             if self.use_dsrl:
                 kwargs["train"] = True
@@ -520,21 +555,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         )
 
         with self.worker_timer("sample"):
-            if self.demo_buffer is not None and self.demo_buffer.is_ready(
-                self.cfg.algorithm.demo_buffer.min_buffer_size
-            ):
-                replay_batch = self.replay_buffer.sample(
-                    num_chunks=global_batch_size_per_rank // 2
-                )
-                demo_batch = self.demo_buffer.sample(
-                    num_chunks=global_batch_size_per_rank // 2
-                )
-                global_batch = concat_batch(replay_batch, demo_batch)
-            else:
-                # Sample batch from replay buffer
-                global_batch = self.replay_buffer.sample(
-                    num_chunks=global_batch_size_per_rank
-                )
+            global_batch = next(self.buffer_dataloader_iter)
 
         train_micro_batch_list = split_dict_to_chunk(
             global_batch,
@@ -720,11 +741,12 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
 
         mean_metric_dict = self.process_train_metrics(metrics)
 
-        torch.cuda.synchronize()
+        Worker.torch_platform.synchronize()
         torch.distributed.barrier()
-        torch.cuda.empty_cache()
+        Worker.torch_platform.empty_cache()
         return mean_metric_dict
 
+    @Worker.timer("actor/compute_adv")
     def compute_advantages_and_returns(self):
         """
         SAC doesn't compute advantages/returns like PPO.
