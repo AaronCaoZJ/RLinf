@@ -19,10 +19,19 @@ cd /home/showlab/Users/zhijun/RLinf
 #     --external_camera_serial 123456789 \
 #     --num_episodes 5 --action_chunk 8 --use_mock_robot --use_mock_camera
 
+# python real_franka_eval.py \
+#     --config_name pi05_blockpap_mix \
+#     --pretrained_path /home/showlab/Users/zhijun/my_ckpt/models/pi05_aligned_co-sft_blockpap/stride2_global_step_15000/actor/model_state_dict/full_weights.pt \
+#     --nuc_ip 192.168.1.112 \
+#     --external_camera_serial 317222075319 \
+#     --show_camera \
+#     --num_episodes 30 --action_chunk 8 --state_refresh_interval 0
+
 python real_franka_eval.py \
-    --config_name pi05_blockpap_mix \
-    --pretrained_path /home/showlab/Users/zhijun/my_ckpt/models/pi05_aligned_co-sft_blockpap/stride2_global_step_15000/actor/model_state_dict/full_weights.pt \
+    --config_name pi05_mvtoken \
+    --pretrained_path /home/showlab/Users/zhijun/my_ckpt/models/pi05_mvtoken_22_27_04/global_step_4000/actor/model_state_dict/full_weights.pt \
     --nuc_ip 192.168.1.112 \
-    --external_camera_serial 317222075319 \
+    --external_camera_serial 327122079691 \
+    --wrist_camera_serial 218622273043 \
     --show_camera \
-    --num_episodes 30 --action_chunk 8 --state_refresh_interval 0
+    --num_episodes 30 --action_chunk 4 --state_refresh_interval 0 --control_frequency 4
