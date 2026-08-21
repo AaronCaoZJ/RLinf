@@ -131,112 +131,6 @@ class _SimImageAugDataset:
         return sample
 
 
-class _LimitImageInputsDataset:
-    """Limit raw sample image keys to match configured image input count.
-
-    This wrapper operates before OpenPI transforms:
-    - num_images_in_input controls max number of kept views (1..3)
-    - optional image_input_views controls preferred view order, e.g.
-      ["image", "wrist_image"] or ["image", "back_image", "wrist_image"]
-
-    Supported view keys are: image, back_image, wrist_image.
-    The base image key `image` is always retained as the first view.
-    """
-
-    _ALL_VIEWS = ("image", "back_image", "wrist_image")
-
-    def __init__(
-        self,
-        dataset,
-        num_images_in_input: int,
-        image_input_views=None,
-        debug_enabled: bool = False,
-        debug_log_every: int = 500,
-    ):
-        self._dataset = dataset
-        self._num_images = int(num_images_in_input)
-        self._debug_enabled = bool(debug_enabled)
-        self._debug_log_every = max(1, int(debug_log_every))
-        self._debug_seen = 0
-        self._debug_combo_counter = {}
-        preferred = []
-        if image_input_views is not None:
-            for view in image_input_views:
-                view_str = str(view)
-                if view_str in self._ALL_VIEWS and view_str not in preferred:
-                    preferred.append(view_str)
-        if preferred and "image" not in preferred:
-            preferred = ["image", *preferred]
-        self._preferred_views = tuple(preferred) if preferred else None
-
-    def __len__(self) -> int:
-        return len(self._dataset)
-
-    @staticmethod
-    def _is_non_empty_image(img) -> bool:
-        if img is None:
-            return False
-        arr = np.asarray(img)
-        return bool(arr.size > 0 and arr.any())
-
-    def __getitem__(self, idx):
-        from torch.utils.data import get_worker_info
-
-        sample = dict(self._dataset[idx])
-        n_img = max(1, min(3, self._num_images))
-
-        if self._preferred_views is not None:
-            candidate_order = list(self._preferred_views)
-            for key in self._ALL_VIEWS:
-                if key not in candidate_order:
-                    candidate_order.append(key)
-        else:
-            # Backward-compatible auto selection:
-            # prefer non-empty auxiliary view; tie-breaker prefers back_image.
-            back_non_empty = self._is_non_empty_image(sample.get("back_image", None))
-            wrist_non_empty = self._is_non_empty_image(sample.get("wrist_image", None))
-            if back_non_empty and not wrist_non_empty:
-                candidate_order = ["image", "back_image", "wrist_image"]
-            elif wrist_non_empty and not back_non_empty:
-                candidate_order = ["image", "wrist_image", "back_image"]
-            elif back_non_empty and wrist_non_empty:
-                candidate_order = ["image", "back_image", "wrist_image"]
-            else:
-                candidate_order = ["image", "back_image", "wrist_image"]
-
-        kept = candidate_order[:n_img]
-        if "image" not in kept:
-            kept = ["image", *[k for k in kept if k != "image"]]
-            kept = kept[:n_img]
-
-        for key in ("back_image", "wrist_image"):
-            if key not in kept:
-                sample.pop(key, None)
-
-        if self._debug_enabled:
-            self._debug_seen += 1
-            combo_key = "+".join(kept)
-            self._debug_combo_counter[combo_key] = (
-                self._debug_combo_counter.get(combo_key, 0) + 1
-            )
-
-            worker_info = get_worker_info()
-            is_worker0 = worker_info is None or worker_info.id == 0
-            if is_worker0 and self._debug_seen % self._debug_log_every == 0:
-                import logging
-
-                back_non_empty = self._is_non_empty_image(sample.get("back_image", None))
-                wrist_non_empty = self._is_non_empty_image(sample.get("wrist_image", None))
-                logging.info(
-                    "[ImageSelectDebug] "
-                    f"num_images_in_input={n_img}, preferred={self._preferred_views}, "
-                    f"kept={kept}, non_empty(back={back_non_empty}, wrist={wrist_non_empty}), "
-                    f"combo_counts={self._debug_combo_counter}"
-                )
-
-        return sample
-
-
 def _log_aug_images_to_wandb(dataset, n: int = 5):
     """在主进程直接 peek dataset 前 n 个样本，将 aug 后的 image/back_image 上传 wandb。
     仅 rank-0 执行，失败时静默跳过。
@@ -503,24 +397,14 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         apply_sim_image_aug = getattr(self.cfg.data, "sim_image_aug", False)
         dataset = _SimImageAugDataset(dataset, num_real_episodes, apply_aug=apply_sim_image_aug)
 
-        # Enforce image-view count for SFT input assembly.
-        num_images_in_input = int(
-            getattr(getattr(self.cfg.actor.model, "openpi", {}), "num_images_in_input", 3)
-        )
-        image_input_views = getattr(self.cfg.data, "image_input_views", None)
-        debug_image_input_selection = bool(
-            getattr(self.cfg.data, "debug_image_input_selection", False)
-        )
-        debug_image_input_log_every = int(
-            getattr(self.cfg.data, "debug_image_input_log_every", 500)
-        )
-        dataset = _LimitImageInputsDataset(
-            dataset,
-            num_images_in_input,
-            image_input_views=image_input_views,
-            debug_enabled=debug_image_input_selection,
-            debug_log_every=debug_image_input_log_every,
-        )
+        # NOTE: no image-view count filtering here.
+        # Co-training now follows the SAME convention as the plain SFT path: whatever image
+        # keys the dataset provides are passed straight through, and FrankaEEInputs decides
+        # per-sample which slots are real (it checks `image.any()`, so an all-zero
+        # placeholder view is masked out automatically). Which dataset field feeds which
+        # observation/* key is declared once, in the DataConfig's RepackTransform.
+        # The previous `_LimitImageInputsDataset` step dropped views by count and only ran
+        # on this weighted branch, which made co-training behave differently from SFT.
 
         # 在 model transform 之前，主进程直接 peek 5 个样本并上传到 wandb
         # 此时图像已经过 aug，像素正确，尚未 normalize
