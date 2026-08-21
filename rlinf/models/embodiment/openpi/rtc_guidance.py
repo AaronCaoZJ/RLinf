@@ -125,7 +125,7 @@ def sample_actions_with_rtc_guidance(
     )
 
     if model.use_vlm_value:
-        values_vlm = model.get_value_from_vlm(prefix_output)
+        values_vlm = model.get_value_from_vlm(prefix_output, prefix_pad_masks)
 
     paper_tau = torch.tensor(0.0, device=device, dtype=noise.dtype)
     dt = torch.tensor(1.0 / num_steps, device=device, dtype=noise.dtype)
