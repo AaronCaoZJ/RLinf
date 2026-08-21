@@ -1,0 +1,109 @@
+# Plain pi0.5 SFT on the MVTOKEN real-robot dataset (MVTOKEN_22_27_04).
+#
+# Derived from arc_real_sft_openpi.yaml with only the necessary changes:
+#   - config_name        -> pi05_mvtoken
+#   - num_action_chunks  -> 4   (must equal TrainConfig action_horizon=4)
+#   - train_data_paths   -> MVTOKEN parent dir (becomes HF_LEROBOT_HOME)
+#   - component_placement-> GPUs 0,2,5,7
+# No co-training: num_real_episodes / co_training_ratio are intentionally absent, so
+# build_dataloader takes the plain (non-weighted) OpenPI path.
+#
+# Cameras: the dataset has image + wrist_image (real) and back_image (all-zero).
+# Nothing needs configuring -- FrankaEEInputs masks the zero slot per sample.
+# `num_images_in_input` is deliberately NOT set: it is unused on the openpi path.
+
+defaults:
+  - model/pi0_5@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    # 7 GPUs. GPU 6 is excluded (another job holds ~100 GB there).
+    actor: 0,1,2,3,4,5,7
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf_mvtoken_sft
+    experiment_name: "mvtoken_22_27_04"
+    logger_backends: ["wandb"]
+    wandb_entity: "aaroncaozj_team"
+
+  max_epochs: 100000
+  max_steps: -1
+  val_check_interval: -1
+  save_interval: 2000
+
+data:
+  # HF_LEROBOT_HOME is set to this in train_vla_sft.py, and openpi then resolves
+  # <train_data_paths>/<repo_id> = .../mix_22_27_04/MVTOKEN_22_27_04
+  train_data_paths: "/workspace1/zhijun/LlamaFactory/data/agentrobot/MVTOKEN/mix_22_27_04"
+  apply_sim_bias: false   # all-real dataset: no sim/real alignment bias
+
+algorithm:
+  adv_type: gae
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  # Memory budget per GPU (target < 90 GB):
+  #   static  ~27 GB  -- 3.6B params, and openpi casts the whole paligemma_with_expert to
+  #                      bf16 on load (to_bfloat16_for_selected_params), so with no_shard
+  #                      each GPU holds 6.7 params + 6.7 grads + 13.4 AdamW. NOT reducible
+  #                      by batch size.
+  #   activations      -- scales with micro_batch_size; ~63 GB of headroom left.
+  # global_batch_size must be divisible by micro * world_size. 256 has no factor of 7, so
+  # with 7 GPUs the nearest workable effective batch is 224 = 32 * 7 * 1 (accum = 1),
+  # i.e. 12.5% below the 256 the lr was tuned at -- close enough to leave lr untouched.
+  micro_batch_size: 32
+  global_batch_size: 224
+  seed: 0
+
+  model:
+    precision: null
+    model_path: "/workspace1/zhijun/hf_download/models/pi05_base"
+    num_action_chunks: 4     # == pi05_mvtoken action_horizon
+    num_steps: 5
+    add_value_head: False
+    openpi:
+      config_name: "pi05_mvtoken"
+      detach_critic_input: True
+      action_subsample_stride: 1
+
+  optim:
+    lr: 2.5e-5
+    value_lr: 1.55e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    lr_scheduler: "cosine"
+    lr_warmup_steps: 1000
+    total_training_steps: 30000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

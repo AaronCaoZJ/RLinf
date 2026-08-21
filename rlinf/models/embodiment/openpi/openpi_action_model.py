@@ -50,7 +50,10 @@ def _to_numpy(x):
 class OpenPi0Config(Pi0Config):
     # config for rl
     config_name: str = "pi0_libero"  # pi0_libero, pi05_libero, pi0_maniskill, pi05_maniskill, pi0_metaworld, pi05_metaworld
-    num_images_in_input: int = 2  # number of images in input
+    # DEPRECATED for openpi: no longer read anywhere. Camera wiring is decided by the
+    # DataConfig field mapping plus FrankaEEInputs' per-sample image_mask, and the value
+    # head pools over prefix_pad_masks. Kept only so existing yamls keep loading.
+    num_images_in_input: int = 2
     noise_method: str = "flow_sde"  # flow_ode, flow_sde, flow_noise, flow_cps
     # noise config for flow-sde
     noise_level: float = 0.5
@@ -1031,7 +1034,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
         # add value based on the vlm for pi05, expert for pi0
         if self.use_vlm_value:
-            values_vlm = self.get_value_from_vlm(prefix_output)
+            values_vlm = self.get_value_from_vlm(prefix_output, prefix_pad_masks)
         if self.config.joint_logprob:
             initial_log_prob = self.get_logprob_norm(
                 x_t, torch.zeros_like(noise), torch.ones_like(noise)
@@ -1356,7 +1359,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             if not self.use_vlm_value:
                 chains_values.append(value_t)
         if self.use_vlm_value:
-            chains_values.append(self.get_value_from_vlm(prefix_output))
+            chains_values.append(
+                self.get_value_from_vlm(prefix_output, prefix_pad_masks)
+            )
         chains_log_probs = torch.stack(chains_log_probs, dim=1)
         chains_values = torch.stack(chains_values, dim=1)
 
@@ -1367,30 +1372,54 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             chains_entropy = torch.zeros_like(chains_log_probs)
         return chains_log_probs, chains_values, chains_entropy
 
-    def get_value_from_vlm(self, prefix_output):
-        # prefix_output:
-        # pi05: [bs, (256 * 3 + 200) = 968, 2048]
-        # pi0: [bs, (256 * 3 + 48) = 816, 1024]
-        # token length
-        if "pi05_" in self.config.config_name:
-            lang_token_len = 200
-            all_token_length = 968
-        elif "pi0_" in self.config.config_name:
-            lang_token_len = 48
-            all_token_length = 816
+    def get_value_from_vlm(self, prefix_output, prefix_pad_masks):
+        """Pool the VLM prefix into a single vector for the value head.
 
-        if self.config.value_vlm_mode == "mean_token":
-            prefix_mask = (
-                [True] * 256 * self.config.num_images_in_input
-                + [False] * 256 * (3 - self.config.num_images_in_input)
-                + [True] * lang_token_len
+        ``prefix_output``    : [bs, L, width]  last hidden states of the prefix.
+        ``prefix_pad_masks`` : [bs, L]  per-token validity produced by ``embed_prefix`` --
+            image tokens carry their own camera's ``image_mask`` and language tokens carry
+            ``lang_masks``. Pooling over it makes the value head follow whichever cameras
+            are actually present in the sample.
+
+        This replaces the previous ``num_images_in_input``-based positional mask
+        ``[True]*256*N + [False]*256*(3-N) + [True]*lang_len``, which assumed the real
+        cameras occupy the FIRST N of the three image slots. That assumption breaks as soon
+        as a middle slot is empty: ``FrankaEEInputs`` maps base->slot0, back->slot1,
+        wrist->slot2, so a base+wrist dataset leaves slot1 blank and the old mask selected
+        the blank slot while dropping the real wrist view. It also averaged in language
+        padding unconditionally. Both are fixed by using the real mask.
+        """
+        valid = prefix_pad_masks.bool()
+        mode = self.config.value_vlm_mode
+        if mode == "mean_token":
+            weight = valid.to(dtype=prefix_output.dtype).unsqueeze(-1)  # [bs, L, 1]
+            prefix_out_value = (prefix_output * weight).sum(dim=1) / weight.sum(
+                dim=1
+            ).clamp(min=1.0)
+        elif mode in ("last_token", "first_token"):
+            seq_len = valid.shape[1]
+            positions = torch.arange(seq_len, device=valid.device)[None, :].expand_as(
+                valid
             )
-        elif self.config.value_vlm_mode == "last_token":
-            prefix_mask = [False] * (all_token_length - 1) + [True] * 1
-        elif self.config.value_vlm_mode == "first_token":
-            prefix_mask = [True] * 1 + [False] * (all_token_length - 1)
-        prefix_out_value = prefix_output[:, prefix_mask, :]
-        prefix_out_value = prefix_out_value.mean(dim=1, keepdim=False)
+            if mode == "last_token":
+                # Valid tokens are NOT contiguous (a masked camera leaves a hole), so the
+                # last valid index is a max over positions, not a count.
+                idx = (
+                    torch.where(valid, positions, torch.full_like(positions, -1))
+                    .max(dim=1)
+                    .values.clamp(min=0)
+                )
+            else:
+                idx = (
+                    torch.where(valid, positions, torch.full_like(positions, seq_len))
+                    .min(dim=1)
+                    .values.clamp(max=seq_len - 1)
+                )
+            batch_idx = torch.arange(prefix_output.shape[0], device=prefix_output.device)
+            prefix_out_value = prefix_output[batch_idx, idx]
+        else:
+            raise ValueError(f"Unsupported value_vlm_mode: {mode}")
+
         prefix_out_value = prefix_out_value.to(dtype=torch.float32)
         values_vlm = self.value_head(prefix_out_value)[:, 0]
         return values_vlm

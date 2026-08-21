@@ -96,6 +96,17 @@ class LeRobotFrankaEEDataConfig(DataConfigFactory):
     #   - delta dims are summed
     #   - binary gripper takes the last command in the window
     action_subsample_stride: int = 1
+    # Dataset-field -> model-slot mapping. This is the ONLY knob for camera wiring:
+    # whatever the dataset provides is read, nothing is filtered by count.
+    # FrankaEEInputs assigns  observation/image -> base_0_rgb (slot 0)
+    #                         observation/back_image -> left_wrist_0_rgb (slot 1)
+    #                         observation/wrist_image -> right_wrist_0_rgb (slot 2)
+    # and masks any slot whose image is all-zero or absent.
+    # Set a key to None when the dataset has no such column -- RepackTransform raises
+    # KeyError on a missing column, so an absent view must be dropped from the map.
+    image_key: str = "image"
+    back_image_key: str | None = "back_image"
+    wrist_image_key: str | None = "wrist_image"
 
     def generate_observations(
         image: np.ndarray, state: np.ndarray, prompt: str
@@ -111,19 +122,21 @@ class LeRobotFrankaEEDataConfig(DataConfigFactory):
     def create(
         self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
     ) -> DataConfig:
+        image_sources = {
+            "observation/image": self.image_key,
+            "observation/back_image": self.back_image_key,
+            "observation/wrist_image": self.wrist_image_key,
+        }
+        repack_map = {k: v for k, v in image_sources.items() if v is not None}
+        repack_map.update(
+            {
+                "observation/state": "state",
+                "actions": "actions",
+                "prompt": "prompt",
+            }
+        )
         repack_transform = _transforms.Group(
-            inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image":       "image",
-                        "observation/back_image":  "back_image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state":       "state",
-                        "actions":                 "actions",
-                        "prompt":                  "prompt",
-                    }
-                )
-            ]
+            inputs=[_transforms.RepackTransform(repack_map)]
         )
 
         input_transforms = []

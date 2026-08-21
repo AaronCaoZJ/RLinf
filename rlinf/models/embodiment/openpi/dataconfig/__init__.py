@@ -545,6 +545,36 @@ _CONFIGS = [
         batch_size=16,
     ),
     TrainConfig(
+        # MVTOKEN real-robot data (agentview + wrist; back column exists but is all-zero,
+        # so FrankaEEInputs masks slot 1 automatically -- see image_key fields below).
+        # action_horizon=4 matches the 2 cm atomic token granularity at fps=4.
+        name="pi05_mvtoken",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=4, discrete_state_input=False
+        ),
+        data=LeRobotFrankaEEDataConfig(
+            repo_id="MVTOKEN_22_27_04",
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/torch/pi05_mvtoken/assets",
+                # Pinned explicitly so norm-stats lookup does not follow repo_id if the
+                # dataset path is later overridden at runtime.
+                asset_id="MVTOKEN_22_27_04",
+            ),
+            # Dataset columns happen to match the defaults; listed for clarity.
+            # Set a key to None if a future dataset lacks that column entirely.
+            image_key="image",
+            back_image_key="back_image",
+            wrist_image_key="wrist_image",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+        batch_size=16,
+    ),
+    TrainConfig(
         name="pi05_sweep_real_3cam",
         model=pi0_config.Pi0Config(
             pi05=True, action_horizon=8, discrete_state_input=False
